@@ -1,6 +1,6 @@
 "use client";
 
-import type { A2UIAction, A2UIPayload } from "@/types/protocols";
+import type { A2UIPayload } from "@/types/protocols";
 
 import ActionCard from "../ui/ActionCard";
 import CodeViewer from "../ui/CodeViewer";
@@ -11,10 +11,9 @@ import RechartGraph from "../ui/RechartGraph";
 
 interface Props {
   payload: A2UIPayload;
-  onAGUI: (intent: string, context: Record<string, unknown>) => Promise<void>;
 }
 
-export default function A2UIResolver({ payload, onAGUI }: Props) {
+export default function A2UIResolver({ payload }: Props) {
   switch (payload.componentName) {
     case "MarkdownBlock":
       return <MarkdownBlock markdown={String(payload.componentData.markdown ?? "")} />;
@@ -35,12 +34,7 @@ export default function A2UIResolver({ payload, onAGUI }: Props) {
           description={String(payload.componentData.description ?? "")}
           metadata={payload.componentData.metadata as Record<string, unknown> | undefined}
           actions={payload.aguiActions}
-          onAction={async (action: A2UIAction) =>
-            onAGUI(action.intent, {
-              ...(action.parameters ?? {}),
-              _source: payload.componentData,
-            })
-          }
+          onAction={async () => undefined}
         />
       );
 

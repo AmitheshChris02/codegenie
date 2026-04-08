@@ -1,7 +1,7 @@
 "use client";
 
 import { HttpAgent, type AgentSubscriber } from "@ag-ui/client";
-import type { UserMessage } from "@ag-ui/core";
+import type { AssistantMessage, UserMessage } from "@ag-ui/core";
 import { A2UIProvider, useA2UIActions } from "@a2ui/react";
 import type { Types as A2UITypes } from "@a2ui/react";
 import { Menu, MessageSquarePlus, MoonStar, PanelLeftClose, PanelLeftOpen, Sun } from "lucide-react";
@@ -27,6 +27,14 @@ function createUserMessage(content: string): UserMessage {
   return {
     id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     role: "user",
+    content,
+  };
+}
+
+function createAssistantMemoryMessage(content: string): AssistantMessage {
+  return {
+    id: `assistant-mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role: "assistant",
     content,
   };
 }
@@ -76,6 +84,94 @@ function extractSurfaceIds(messages: A2UITypes.ServerToClientMessage[]): string[
   return Array.from(ids);
 }
 
+function getLiteralString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  const asRecord = value as Record<string, unknown>;
+  if (typeof asRecord.literalString === "string") return asRecord.literalString;
+  return "";
+}
+
+function summarizeComponent(componentName: string, rawProps: unknown): string | null {
+  const props = typeof rawProps === "object" && rawProps !== null ? (rawProps as Record<string, unknown>) : {};
+
+  if (componentName === "Text") {
+    const text = getLiteralString(props.text).trim();
+    return text || null;
+  }
+
+  if (componentName === "MarkdownBlock") {
+    const text = String(props.markdown ?? "").trim();
+    if (!text) return null;
+    return text.slice(0, 1200);
+  }
+
+  if (componentName === "CodeViewer") {
+    const filename = props.filename ? ` (${String(props.filename)})` : "";
+    const language = props.language ? ` [${String(props.language)}]` : "";
+    return `Code snippet${filename}${language}`;
+  }
+
+  if (componentName === "DiffViewer") {
+    const filename = props.filename ? ` (${String(props.filename)})` : "";
+    const language = props.language ? ` [${String(props.language)}]` : "";
+    return `Code diff${filename}${language}`;
+  }
+
+  if (componentName === "RechartGraph") {
+    const title = props.title ? `: ${String(props.title)}` : "";
+    const chartType = props.chartType ? ` (${String(props.chartType)})` : "";
+    return `Chart${chartType}${title}`;
+  }
+
+  if (componentName === "ActionCard") {
+    const title = String(props.title ?? "Action").trim();
+    const description = String(props.description ?? "").trim();
+    const actions = Array.isArray(props.aguiActions)
+      ? (props.aguiActions as Array<Record<string, unknown>>)
+          .map((item) => String(item.label ?? item.intent ?? ""))
+          .filter((v) => v.trim().length > 0)
+      : [];
+
+    const actionsPart = actions.length > 0 ? ` | Actions: ${actions.join(", ")}` : "";
+    return `${title}${description ? ` - ${description}` : ""}${actionsPart}`.trim();
+  }
+
+  if (componentName === "Button") {
+    const action = props.action as Record<string, unknown> | undefined;
+    if (action && typeof action.name === "string" && action.name.trim()) {
+      return `Button action: ${action.name}`;
+    }
+    return "Button action";
+  }
+
+  return null;
+}
+
+function extractA2UIContextSnippets(messages: A2UITypes.ServerToClientMessage[]): string[] {
+  const snippets: string[] = [];
+
+  for (const message of messages) {
+    const components = message.surfaceUpdate?.components;
+    if (!Array.isArray(components)) continue;
+
+    for (const componentInstance of components) {
+      const instance = componentInstance as { id?: unknown; component?: unknown };
+      if (instance.id === "root") continue;
+      if (!instance.component || typeof instance.component !== "object") continue;
+
+      const entries = Object.entries(instance.component as Record<string, unknown>);
+      if (entries.length === 0) continue;
+
+      const [componentName, componentProps] = entries[0];
+      const summary = summarizeComponent(componentName, componentProps);
+      if (summary && summary.trim()) snippets.push(summary.trim());
+    }
+  }
+
+  return Array.from(new Set(snippets));
+}
+
 function actionToPrompt(actionMessage: A2UITypes.A2UIClientEventMessage): string {
   const action = actionMessage.userAction;
   if (!action) return "User triggered a UI action.";
@@ -122,7 +218,9 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
     return () => clearTimeout(timer);
   }, []);
 
-  useEffect(() => { setMounted(true); }, []);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     const node = bottomRef.current;
@@ -175,7 +273,17 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
       const runId = uuidv4();
       const streamingId = startAssistantMessage();
       const renderedSurfaces = new Set<string>();
+      const a2uiSnippetsForMemory: string[] = [];
+      let assistantTextBuffer = "";
       let finalized = false;
+
+      const persistAssistantMemory = () => {
+        if (assistantTextBuffer.trim().length > 0) return;
+        if (a2uiSnippetsForMemory.length === 0) return;
+        const summary = Array.from(new Set(a2uiSnippetsForMemory)).join("\n\n").trim();
+        if (!summary) return;
+        agent.addMessage(createAssistantMemoryMessage(summary));
+      };
 
       const finish = () => {
         if (!finalized) {
@@ -185,17 +293,29 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
       };
 
       const subscriber: AgentSubscriber = {
-        onReasoningStartEvent: () => { setThinking(streamingId, true); },
-        onReasoningMessageContentEvent: () => { setThinking(streamingId, true); },
-        onReasoningEndEvent: () => { setThinking(streamingId, false); },
+        onReasoningStartEvent: () => {
+          setThinking(streamingId, true);
+        },
+        onReasoningMessageContentEvent: () => {
+          setThinking(streamingId, true);
+        },
+        onReasoningEndEvent: () => {
+          setThinking(streamingId, false);
+        },
         onTextMessageContentEvent: ({ event }) => {
-          appendTextDelta(streamingId, String(event.delta ?? ""));
+          const delta = String(event.delta ?? "");
+          assistantTextBuffer += delta;
+          appendTextDelta(streamingId, delta);
         },
         onCustomEvent: ({ event }) => {
           if (event.name !== A2UI_CUSTOM_EVENT_NAME) return;
           const rawPayload = event.value ?? (event as { data?: unknown }).data ?? (event as { rawEvent?: unknown }).rawEvent;
           const a2uiMessages = normalizeA2UIMessages(rawPayload);
           if (a2uiMessages.length === 0) return;
+
+          const snippets = extractA2UIContextSnippets(a2uiMessages);
+          if (snippets.length > 0) a2uiSnippetsForMemory.push(...snippets);
+
           processMessages(a2uiMessages);
           for (const surfaceId of extractSurfaceIds(a2uiMessages)) {
             if (!renderedSurfaces.has(surfaceId)) {
@@ -208,7 +328,10 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
           appendTextDelta(streamingId, `\n\nError: ${event.message}`);
           finish();
         },
-        onRunFinishedEvent: () => { finish(); },
+        onRunFinishedEvent: () => {
+          persistAssistantMemory();
+          finish();
+        },
       };
 
       try {
@@ -222,7 +345,18 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
         finish();
       }
     },
-    [addUserMessage, appendA2UISurface, appendTextDelta, conversationId, ensureAgent, finalizeMessage, processMessages, setConversationId, setThinking, startAssistantMessage]
+    [
+      addUserMessage,
+      appendA2UISurface,
+      appendTextDelta,
+      conversationId,
+      ensureAgent,
+      finalizeMessage,
+      processMessages,
+      setConversationId,
+      setThinking,
+      startAssistantMessage,
+    ]
   );
 
   const handleSend = useCallback(async (text: string) => {
@@ -248,12 +382,12 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
   }, [clearSurfaces, reset]);
 
   return (
-    <div className="relative min-h-screen">
-      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(76,176,176,0.22),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(34,98,101,0.14),_transparent_42%)]" />
+    <div className="relative min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(76,176,176,0.16),_transparent_44%),radial-gradient(circle_at_bottom_right,_rgba(34,98,101,0.12),_transparent_40%)]" />
 
-      <div className="mx-auto flex min-h-screen max-w-[1200px]">
+      <div className="mx-auto flex min-h-screen w-full max-w-[1400px]">
         <aside
-          className={`border-r border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-950/75 ${
+          className={`border-r border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-950/70 ${
             sidebarOpen ? "w-72" : "w-16"
           } transition-all duration-300`}
         >
@@ -294,18 +428,19 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
           )}
         </aside>
 
-        <section className="relative flex min-h-screen flex-1 flex-col">
-          <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/85 px-4 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/85">
-            <div className="mx-auto flex w-full max-w-[760px] items-center justify-between">
-              <div className="flex items-center gap-3">
-                <h1 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">CodeGenie</h1>
-                <span className="rounded-full border border-slate-300 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-600 dark:border-slate-700 dark:text-slate-300">
+        <section className="relative flex min-h-screen min-w-0 flex-1 flex-col">
+          <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/85 px-5 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80">
+            <div className="mx-auto flex w-full max-w-[920px] items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <h1 className="truncate text-lg font-semibold tracking-tight">CodeGenie</h1>
+                <span className="hidden rounded-full border border-slate-300 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-600 dark:border-slate-700 dark:text-slate-300 md:inline-flex">
                   {MODEL_BADGE}
                 </span>
                 <span className="rounded-full bg-brand-50 px-2 py-1 text-[10px] font-semibold text-brand-700 dark:bg-brand-900/40 dark:text-brand-200">
                   {activeConversationLabel}
                 </span>
               </div>
+
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -332,19 +467,14 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
             </div>
           </header>
 
-          <main className="flex-1 overflow-y-auto px-4 pb-36 pt-6">
-            <div className="mx-auto max-w-[760px]">
-              <MessageList
-                messages={messages}
-                currentStreamingId={currentStreamingId}
-                showSkeleton={showSkeleton}
-                onAGUI={async () => undefined}
-              />
+          <main className="flex-1 overflow-y-auto px-5 pb-40 pt-6">
+            <div className="mx-auto w-full max-w-[920px]">
+              <MessageList messages={messages} currentStreamingId={currentStreamingId} showSkeleton={showSkeleton} />
               <div ref={bottomRef} className="h-1 w-full" />
             </div>
           </main>
 
-          <div className="fixed bottom-0 right-0 z-20 w-full border-t border-slate-200 bg-white/85 backdrop-blur dark:border-slate-800 dark:bg-slate-950/85 lg:w-[calc(100%-18rem)]">
+          <div className="sticky bottom-0 z-20 border-t border-slate-200 bg-white/88 backdrop-blur dark:border-slate-800 dark:bg-slate-950/88">
             <MessageInput disabled={isStreaming} onSend={handleSend} />
           </div>
         </section>

@@ -12,9 +12,9 @@ export default function StreamingText({
   return (
     <div className="relative">
       <MarkdownBlock markdown={text} />
-      {isStreaming && (
-        <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-slate-600 dark:bg-slate-300" />
-      )}
+      {isStreaming ? (
+        <span className="ml-1 inline-block h-5 w-0.5 animate-pulse bg-brand-600 align-middle dark:bg-brand-300" />
+      ) : null}
     </div>
   );
 }

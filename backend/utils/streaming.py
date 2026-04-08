@@ -1,21 +1,28 @@
-import json
 from typing import Any, AsyncGenerator
 
 from ag_ui.core import (
+    CustomEvent,
     EventType,
+    ReasoningEndEvent,
+    ReasoningMessageContentEvent,
+    ReasoningMessageEndEvent,
+    ReasoningMessageStartEvent,
+    ReasoningStartEvent,
     RunAgentInput,
+    RunErrorEvent,
     RunFinishedEvent,
     RunStartedEvent,
-    TextMessageContentEvent,
-    TextMessageStartEvent,
+    StepFinishedEvent,
+    StepStartedEvent,
     TextMessageEndEvent,
-    CustomEvent,
+    TextMessageStartEvent,
 )
 from ag_ui.encoder import EventEncoder
 
 from backend.agents.a2ui_builder import StreamParser
 from backend.agents.agui_event_builder import A2UISurfaceMessageBuilder, build_prompt_and_history
 from backend.agents.strands_agent import stream_bedrock_tokens
+from backend.models.ui_protocols import A2UIPayload
 
 
 async def chat_event_stream(
@@ -32,9 +39,11 @@ async def chat_event_stream(
     messages = [m.model_dump() for m in (input_data.messages or [])]
     prompt, history = build_prompt_and_history(messages, forwarded_props)
 
-    # Run started
     yield encoder.encode(
         RunStartedEvent(type=EventType.RUN_STARTED, run_id=run_id, thread_id=thread_id)
+    )
+    yield encoder.encode(
+        StepStartedEvent(type=EventType.STEP_STARTED, step_name="model_generation")
     )
 
     msg_id = f"msg-{run_id}"
@@ -48,41 +57,142 @@ async def chat_event_stream(
 
     parser = StreamParser()
     surface_builder = A2UISurfaceMessageBuilder(run_id)
-    a2ui_messages_batch: list[dict[str, Any]] = []
+
+    saw_a2ui = False
+    buffered_text_chunks: list[str] = []
+    run_error_message: str | None = None
+    reasoning_counter = 0
+
+    def _buffer_text(value: Any) -> None:
+        text = str(value or "")
+        if text:
+            buffered_text_chunks.append(text)
+
+    def _emit_component(payload: A2UIPayload) -> bytes:
+        msgs = surface_builder.build_messages(payload)
+        return encoder.encode(
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="A2UI_MESSAGES",
+                value={"messages": msgs},
+            )
+        )
 
     async for token in stream_bedrock_tokens(prompt, history):
         for event_type, value in parser.feed(token):
             if event_type == "text_delta":
-                yield encoder.encode(
-                    TextMessageContentEvent(
-                        type=EventType.TEXT_MESSAGE_CONTENT,
-                        message_id=msg_id,
-                        delta=value,
-                    )
-                )
-            elif event_type == "a2ui":
-                import sys
-                print(f"[A2UI] componentName={value.componentName} componentData={json.dumps(value.componentData)[:300]}", file=sys.stderr, flush=True)
-                msgs = surface_builder.build_messages(value)
-                a2ui_messages_batch.extend(msgs)
-                yield encoder.encode(
-                    CustomEvent(
-                        type=EventType.CUSTOM,
-                        name="A2UI_MESSAGES",
-                        value={"messages": msgs},
-                    )
-                )
+                _buffer_text(value)
+                continue
 
-    # Flush remaining buffer
+            if event_type == "thinking":
+                reasoning_text = str(value or "").strip()
+                if not reasoning_text:
+                    continue
+                reasoning_counter += 1
+                reasoning_id = f"reasoning-{run_id}-{reasoning_counter}"
+
+                yield encoder.encode(
+                    ReasoningStartEvent(
+                        type=EventType.REASONING_START,
+                        message_id=reasoning_id,
+                    )
+                )
+                yield encoder.encode(
+                    ReasoningMessageStartEvent(
+                        type=EventType.REASONING_MESSAGE_START,
+                        message_id=reasoning_id,
+                        role="reasoning",
+                    )
+                )
+                yield encoder.encode(
+                    ReasoningMessageContentEvent(
+                        type=EventType.REASONING_MESSAGE_CONTENT,
+                        message_id=reasoning_id,
+                        delta=reasoning_text,
+                    )
+                )
+                yield encoder.encode(
+                    ReasoningMessageEndEvent(
+                        type=EventType.REASONING_MESSAGE_END,
+                        message_id=reasoning_id,
+                    )
+                )
+                yield encoder.encode(
+                    ReasoningEndEvent(
+                        type=EventType.REASONING_END,
+                        message_id=reasoning_id,
+                    )
+                )
+                continue
+
+            if event_type == "a2ui":
+                saw_a2ui = True
+                yield _emit_component(value)
+
     for event_type, value in parser.flush():
         if event_type == "text_delta" and value:
-            yield encoder.encode(
-                TextMessageContentEvent(
-                    type=EventType.TEXT_MESSAGE_CONTENT,
-                    message_id=msg_id,
-                    delta=value,
-                )
+            _buffer_text(value)
+
+    buffered_text = "".join(buffered_text_chunks).strip()
+    if buffered_text.startswith("Error calling Bedrock:") or "Error calling Bedrock:" in buffered_text:
+        run_error_message = buffered_text
+
+    # Component-first output policy:
+    # Any plain text generated by the model is rendered as an A2UI component
+    # instead of raw text stream content.
+    if buffered_text:
+        if run_error_message:
+            error_payload = A2UIPayload(
+                componentName="ActionCard",
+                componentData={
+                    "title": "Model Error",
+                    "description": run_error_message,
+                    "aguiActions": [
+                        {
+                            "label": "Retry",
+                            "intent": "RETRY_LAST_REQUEST",
+                            "parameters": {},
+                            "style": "primary",
+                        }
+                    ],
+                },
+                aguiActions=[],
             )
+            yield _emit_component(error_payload)
+        else:
+            text_payload = A2UIPayload(
+                componentName="MarkdownBlock",
+                componentData={"markdown": buffered_text},
+                aguiActions=[],
+            )
+            yield _emit_component(text_payload)
+
+    if not saw_a2ui and not buffered_text and not run_error_message:
+        empty_payload = A2UIPayload(
+            componentName="ActionCard",
+            componentData={
+                "title": "Need More Detail",
+                "description": "I could not produce a structured response for that follow-up. Please retry or ask the same request with one extra detail.",
+                "aguiActions": [
+                    {
+                        "label": "Retry",
+                        "intent": "RETRY_LAST_REQUEST",
+                        "parameters": {},
+                        "style": "primary",
+                    }
+                ],
+            },
+            aguiActions=[],
+        )
+        yield _emit_component(empty_payload)
+
+    if run_error_message:
+        yield encoder.encode(
+            RunErrorEvent(
+                type=EventType.RUN_ERROR,
+                message=run_error_message,
+            )
+        )
 
     yield encoder.encode(
         TextMessageEndEvent(
@@ -92,9 +202,13 @@ async def chat_event_stream(
     )
 
     yield encoder.encode(
+        StepFinishedEvent(type=EventType.STEP_FINISHED, step_name="model_generation")
+    )
+    yield encoder.encode(
         RunFinishedEvent(
             type=EventType.RUN_FINISHED,
             run_id=run_id,
             thread_id=thread_id,
         )
     )
+

@@ -1,5 +1,6 @@
 import json
 import re
+from math import isfinite
 from typing import Any, Generator
 
 from backend.models.ui_protocols import A2UIPayload
@@ -10,19 +11,29 @@ _A2UI_CLOSE = "</a2ui>"
 _THINK_OPEN = "<thinking>"
 _THINK_CLOSE = "</thinking>"
 
+_COMPONENT_ALIASES: dict[str, str] = {
+    "barchart": "RechartGraph",
+    "linechart": "RechartGraph",
+    "piechart": "RechartGraph",
+    "chart": "RechartGraph",
+    "graph": "RechartGraph",
+    "actionitems": "ActionCard",
+}
+
 
 def _repair_json(raw: str) -> str:
-    """Best-effort repair for truncated/malformed JSON from the model."""
+    """Best-effort repair for truncated or malformed JSON from the model."""
     raw = raw.strip()
     try:
         json.loads(raw)
         return raw
     except json.JSONDecodeError:
         pass
-    # Close unclosed braces/brackets
+
     opens = raw.count("{") - raw.count("}")
     closes = raw.count("[") - raw.count("]")
     raw += "}" * max(opens, 0) + "]" * max(closes, 0)
+
     try:
         json.loads(raw)
         return raw
@@ -30,13 +41,194 @@ def _repair_json(raw: str) -> str:
         return raw
 
 
+def _extract_markdown_links(markdown: str) -> list[tuple[str, str]]:
+    matches = re.findall(r"\[([^\]]+)\]\((https?://[^\)]+)\)", markdown)
+    return [(label.strip(), url.strip()) for label, url in matches if label.strip() and url.strip()]
+
+def _extract_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if isfinite(parsed) else None
+
+    if isinstance(value, dict):
+        for key in ("literalNumber", "literalString", "value"):
+            if key in value:
+                nested = _extract_number(value.get(key))
+                if nested is not None:
+                    return nested
+        return None
+
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").strip()
+        if not cleaned:
+            return None
+
+        try:
+            direct = float(cleaned)
+            if isfinite(direct):
+                return direct
+        except ValueError:
+            pass
+
+        match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+        if match:
+            try:
+                extracted = float(match.group(0))
+                if isfinite(extracted):
+                    return extracted
+            except ValueError:
+                return None
+
+    return None
+
+
+def _normalize_chart_payload(component_data: dict[str, Any]) -> dict[str, Any]:
+    data = dict(component_data)
+
+    chart_type = str(data.get("chartType", "bar")).strip().lower()
+    if "line" in chart_type:
+        chart_type = "line"
+    elif "pie" in chart_type or "donut" in chart_type or "doughnut" in chart_type:
+        chart_type = "pie"
+    else:
+        chart_type = "bar"
+    data["chartType"] = chart_type
+
+    raw_data = data.get("data", [])
+    normalized_data: list[dict[str, Any]] = []
+
+    if isinstance(raw_data, list):
+        normalized_data = [row for row in raw_data if isinstance(row, dict)]
+    elif isinstance(raw_data, dict):
+        normalized_data = [{"name": k, "value": v} for k, v in raw_data.items()]
+    elif isinstance(raw_data, str):
+        try:
+            parsed = json.loads(raw_data)
+            if isinstance(parsed, list):
+                normalized_data = [row for row in parsed if isinstance(row, dict)]
+            elif isinstance(parsed, dict):
+                normalized_data = [{"name": k, "value": v} for k, v in parsed.items()]
+        except json.JSONDecodeError:
+            normalized_data = []
+
+    data["data"] = normalized_data
+
+    if normalized_data:
+        keys = list(normalized_data[0].keys())
+        x_key = str(data.get("xKey") or data.get("x") or data.get("labelKey") or "").strip()
+        y_key = str(data.get("yKey") or data.get("y") or data.get("valueKey") or "").strip()
+
+        if not x_key or x_key not in keys:
+            x_key = next((k for k in keys if k.lower() in {"name", "label", "category", "module"}), keys[0])
+
+        numeric_candidates = [
+            k
+            for k in keys
+            if any(_extract_number(row.get(k)) is not None for row in normalized_data)
+        ]
+
+        if not y_key or y_key not in keys:
+            y_key = next((k for k in numeric_candidates if k != x_key), numeric_candidates[0] if numeric_candidates else "value")
+
+        if y_key in keys:
+            for row in normalized_data:
+                parsed = _extract_number(row.get(y_key))
+                if parsed is not None:
+                    row[y_key] = parsed
+
+        data["xKey"] = x_key
+        data["yKey"] = y_key
+
+    return data
+
+
+def _maybe_convert_markdown_links_to_action_card(component_name: str, component_data: dict[str, Any], agui_actions: list[dict[str, Any]]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    if component_name not in {"MarkdownBlock", "Text"}:
+        return component_name, component_data, agui_actions
+
+    if agui_actions:
+        return component_name, component_data, agui_actions
+
+    markdown = ""
+    if component_name == "MarkdownBlock":
+        markdown = str(component_data.get("markdown", "")).strip()
+    else:
+        text_obj = component_data.get("text")
+        if isinstance(text_obj, dict):
+            markdown = str(text_obj.get("literalString", "")).strip()
+        else:
+            markdown = str(text_obj or "").strip()
+
+    if not markdown:
+        return component_name, component_data, agui_actions
+
+    links = _extract_markdown_links(markdown)
+    if not links:
+        return component_name, component_data, agui_actions
+
+    actions = [
+        {
+            "label": label,
+            "intent": "OPEN_LINK",
+            "parameters": {"url": url},
+            "style": "default",
+        }
+        for label, url in links[:5]
+    ]
+
+    description = re.sub(r"\[[^\]]+\]\(https?://[^\)]+\)", "", markdown).strip()
+    if len(description) > 240:
+        description = description[:240].rstrip() + "..."
+
+    action_card_data = {
+        "title": "Action Items",
+        "description": description or "Choose an action.",
+        "aguiActions": actions,
+        "metadata": {"source": "link-conversion", "linkCount": len(links)},
+    }
+    return "ActionCard", action_card_data, actions
+
+
+def _normalize_component(
+    component_name: str,
+    component_data: dict[str, Any],
+    agui_actions: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    alias_key = component_name.strip().lower().replace("_", "")
+    canonical_name = _COMPONENT_ALIASES.get(alias_key, component_name)
+    data = dict(component_data)
+    actions = list(agui_actions)
+
+    if not actions and isinstance(data.get("aguiActions"), list):
+        actions = [a for a in data["aguiActions"] if isinstance(a, dict)]
+
+    if canonical_name == "RechartGraph":
+        data = _normalize_chart_payload(data)
+
+    if canonical_name == "Button" and not actions:
+        url = str(data.get("url") or data.get("href") or "").strip()
+        label = str(data.get("label") or "Open").strip() or "Open"
+        if url:
+            actions = [{"label": label, "intent": "OPEN_LINK", "parameters": {"url": url}, "style": "primary"}]
+
+    if canonical_name == "ActionCard" and "aguiActions" not in data and actions:
+        data["aguiActions"] = actions
+
+    canonical_name, data, actions = _maybe_convert_markdown_links_to_action_card(canonical_name, data, actions)
+
+    return canonical_name, data, actions
+
+
 def _parse_a2ui_block(raw: str) -> A2UIPayload | None:
     raw = raw.strip()
     repaired = _repair_json(raw)
+
     try:
         data = json.loads(repaired)
     except json.JSONDecodeError:
-        # Fallback: wrap as MarkdownBlock
         return A2UIPayload(
             componentName="MarkdownBlock",
             componentData={"markdown": raw},
@@ -48,14 +240,23 @@ def _parse_a2ui_block(raw: str) -> A2UIPayload | None:
             componentData={"markdown": raw},
         )
 
-    component_name = data.get("componentName", "MarkdownBlock")
+    component_name = str(data.get("componentName", "MarkdownBlock"))
     component_data = data.get("componentData", data.get("props", {}))
     agui_actions = data.get("aguiActions", [])
 
+    safe_component_data = component_data if isinstance(component_data, dict) else {}
+    safe_actions = agui_actions if isinstance(agui_actions, list) else []
+
+    component_name, safe_component_data, safe_actions = _normalize_component(
+        component_name,
+        safe_component_data,
+        safe_actions,
+    )
+
     return A2UIPayload(
         componentName=component_name,
-        componentData=component_data if isinstance(component_data, dict) else {},
-        aguiActions=agui_actions if isinstance(agui_actions, list) else [],
+        componentData=safe_component_data,
+        aguiActions=safe_actions,
     )
 
 
@@ -99,7 +300,6 @@ class StreamParser:
                     yield ("a2ui", payload)
                 continue
 
-            # Look for next special tag
             think_idx = self._buf.find(_THINK_OPEN)
             a2ui_idx = self._buf.find(_A2UI_OPEN)
 
@@ -113,8 +313,6 @@ class StreamParser:
                 tag = _A2UI_OPEN
                 flag = "a2ui"
             else:
-                # No special tag found — emit safe prefix
-                # Keep a tail in buffer in case a tag is split across tokens
                 safe_len = max(0, len(self._buf) - max(len(_THINK_OPEN), len(_A2UI_OPEN)))
                 if safe_len > 0:
                     text = self._buf[:safe_len]
@@ -122,7 +320,6 @@ class StreamParser:
                     yield ("text_delta", text)
                 break
 
-            # Emit text before the tag
             if next_idx > 0:
                 yield ("text_delta", self._buf[:next_idx])
 
@@ -134,6 +331,7 @@ class StreamParser:
 
     def flush(self) -> Generator[tuple[str, Any], None, None]:
         if self._buf:
-            # Emit whatever remains as plain text
             yield ("text_delta", self._buf)
             self._buf = ""
+
+

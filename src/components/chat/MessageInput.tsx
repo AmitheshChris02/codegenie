@@ -31,16 +31,16 @@ export default function MessageInput({ disabled = false, onSend }: Props) {
   }
 
   return (
-    <form onSubmit={onSubmit} className="mx-auto w-full max-w-[760px] px-4 pb-5">
-      <div className="flex items-end gap-3 rounded-2xl border border-slate-300 bg-white/95 p-3 shadow-soft backdrop-blur dark:border-slate-700 dark:bg-slate-900/95">
+    <form onSubmit={onSubmit} className="mx-auto w-full max-w-[920px] px-5 pb-5 pt-3">
+      <div className="flex items-end gap-3 rounded-2xl border border-slate-300 bg-white p-3 shadow-soft dark:border-slate-700 dark:bg-slate-900">
         <textarea
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={onKeyDown}
           disabled={disabled}
-          placeholder="Ask CodeGenie..."
+          placeholder="Message CodeGenie"
           rows={1}
-          className="max-h-40 min-h-11 flex-1 resize-y rounded-xl bg-transparent px-2 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-500 disabled:opacity-60 dark:text-slate-100 dark:placeholder:text-slate-400"
+          className="max-h-48 min-h-11 flex-1 resize-y rounded-xl bg-transparent px-2 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-500 disabled:opacity-60 dark:text-slate-100 dark:placeholder:text-slate-400"
         />
         <button
           type="submit"

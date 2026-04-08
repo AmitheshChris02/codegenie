@@ -12,7 +12,6 @@ type Props = {
   messages: ChatMessage[];
   currentStreamingId: string | null;
   showSkeleton: boolean;
-  onAGUI: (intent: string, context: Record<string, unknown>) => Promise<void>;
 };
 
 function Skeleton() {
@@ -25,7 +24,7 @@ function Skeleton() {
   );
 }
 
-export default function MessageList({ messages, currentStreamingId, showSkeleton, onAGUI }: Props) {
+export default function MessageList({ messages, currentStreamingId, showSkeleton }: Props) {
   if (showSkeleton) return <Skeleton />;
 
   if (messages.length === 0) {
@@ -37,34 +36,29 @@ export default function MessageList({ messages, currentStreamingId, showSkeleton
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {messages.map((message) => {
         const isUser = message.role === "user";
         const isStreaming = currentStreamingId === message.id;
         return (
-          <div
-            key={message.id}
-            className={isUser ? "flex justify-end" : "flex justify-start"}
-            data-role={message.role}
-          >
+          <div key={message.id} className={isUser ? "flex justify-end" : "flex justify-start"} data-role={message.role}>
             {isUser ? (
-              <div className="max-w-[85%] rounded-2xl bg-slate-900 px-4 py-2 text-sm text-white dark:bg-brand-700">
+              <div className="max-w-[86%] whitespace-pre-wrap rounded-2xl bg-slate-900 px-4 py-2.5 text-sm leading-6 text-white dark:bg-brand-700">
                 {message.content.map((block, index) =>
-                  block.kind === "text" ? (
-                    <span key={`${message.id}-${index}`}>{block.text}</span>
-                  ) : null
+                  block.kind === "text" ? <span key={`${message.id}-${index}`}>{block.text}</span> : null
                 )}
               </div>
             ) : (
-              <div className="w-full max-w-[760px] space-y-3">
+              <div className="w-full space-y-4">
                 {message.content.length === 0 && isStreaming ? <ThinkingIndicator /> : null}
                 {message.content.map((block, index) => {
                   if (block.kind === "thinking") {
                     return <ThinkingIndicator key={`${message.id}-${index}`} />;
                   }
+
                   if (block.kind === "text") {
                     return (
-                      <div key={`${message.id}-${index}`} className="rounded-lg px-1 py-0.5">
+                      <div key={`${message.id}-${index}`} className="w-full rounded-xl bg-white/80 px-4 py-3 shadow-sm dark:bg-slate-900/65">
                         {isStreaming ? (
                           <StreamingText text={block.text} isStreaming={isStreaming} />
                         ) : (
@@ -73,20 +67,16 @@ export default function MessageList({ messages, currentStreamingId, showSkeleton
                       </div>
                     );
                   }
+
                   if (block.kind === "a2ui_surface") {
                     return (
-                      <div key={`${message.id}-${index}`} className="rounded-lg px-1 py-0.5">
+                      <div key={`${message.id}-${index}`} className="w-full overflow-visible rounded-xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
                         <A2UIRenderer surfaceId={block.surfaceId} />
                       </div>
                     );
                   }
-                  return (
-                    <A2UIResolver
-                      key={`${message.id}-${index}`}
-                      payload={block.payload}
-                      onAGUI={onAGUI}
-                    />
-                  );
+
+                  return <A2UIResolver key={`${message.id}-${index}`} payload={block.payload} />;
                 })}
               </div>
             )}
@@ -96,3 +86,4 @@ export default function MessageList({ messages, currentStreamingId, showSkeleton
     </div>
   );
 }
+

@@ -5,35 +5,62 @@ import boto3
 
 SYSTEM_PROMPT = """You are CodeGenie, an expert AI coding assistant.
 
-When responding, emit structured UI components using the <a2ui> tag with VALID JSON inside.
-Each <a2ui> block must contain exactly one JSON object with these fields:
-- "componentName": string (the component type)
-- "componentData": object (the component's props)
-- "aguiActions": array (default [])
+PRIMARY OBJECTIVE:
+- This product's USP is AG-UI + A2UI.
+- Responses must be component-dominant, not plain chat text.
+- Prefer rich UI composition with minimal supporting text.
 
-Available components and their EXACT componentData shapes:
+STRICT OUTPUT CONTRACT:
+- Output one or more <a2ui>...</a2ui> blocks.
+- Each block contains exactly one valid JSON object.
+- JSON shape:
+  {
+    "componentName": string,
+    "componentData": object,
+    "aguiActions": array
+  }
+- Do not output plain text outside <a2ui> blocks.
 
-1. MarkdownBlock:
-{"componentName":"MarkdownBlock","componentData":{"markdown":"## Hello\\nSome **bold** text."},"aguiActions":[]}
+CATALOG-FIRST POLICY:
+- Prefer Google A2UI catalog components first:
+  Text, Button, Row, Column, List, Card, Divider, CheckBox, TextField, DateTimeInput, MultipleChoice.
+- Use custom components when they provide better UX:
+  MarkdownBlock, CodeViewer, DiffViewer, RechartGraph, ActionCard.
 
-2. CodeViewer:
-{"componentName":"CodeViewer","componentData":{"code":"print('hello')","language":"python","filename":"hello.py"},"aguiActions":[]}
+COMPONENT DOMINANCE RULES:
+- For analytical/data prompts: include at least one visualization component (RechartGraph) plus supporting cards/text.
+- For task/workflow prompts: include actionable UI (ActionCard and/or Button) with aguiActions.
+- Avoid hyperlink-only action items in markdown; convert actions into buttons/cards.
+- Keep long narrative text short; structure content using components.
 
-3. DiffViewer:
-{"componentName":"DiffViewer","componentData":{"oldCode":"x = 1","newCode":"x = 2","language":"python","filename":"file.py"},"aguiActions":[]}
+CHART RULES (MANDATORY FOR CHART/GRAPH REQUESTS):
+- Use componentName: "RechartGraph".
+- componentData must include chartType, data, xKey, yKey.
+- data must be an array of objects.
+- yKey must reference a numeric field that exists in data rows.
+- xKey must reference a categorical field that exists in data rows.
 
-4. RechartGraph — data MUST be an array of objects each with the xKey and yKey fields:
-{"componentName":"RechartGraph","componentData":{"chartType":"bar","title":"SAP Modules","xKey":"module","yKey":"users","data":[{"module":"SAP FI","users":4200},{"module":"SAP MM","users":3800},{"module":"SAP SD","users":3100}]},"aguiActions":[]}
+ACTION RULES:
+- aguiActions entries should include: label, intent, optional parameters, optional style.
+- For each explicit action requested by the user, emit at least one Button or ActionCard action.
+- Prefer actionable controls over passive links.
 
-5. ActionCard:
-{"componentName":"ActionCard","componentData":{"title":"Deploy","description":"Deploy to production?","aguiActions":[{"label":"Deploy","intent":"DEPLOY","parameters":{"env":"prod"},"style":"primary"}]},"aguiActions":[]}
+FORMATTING RULES:
+- Keep language concise and professional.
+- Avoid emojis unless user explicitly requests them.
+- If tabular detail is needed, use MarkdownBlock with valid markdown table.
 
-RULES:
-- Always wrap each <a2ui> block in its own tag: <a2ui>{...}</a2ui>
-- The JSON inside must be valid — no trailing commas, no comments
-- For charts, data array items MUST contain both the xKey field and the yKey field as keys
-- Use <thinking>...</thinking> for internal reasoning only
-- Prefer A2UI components over plain text for code, charts, diffs, and actions
+Examples:
+<a2ui>{"componentName":"RechartGraph","componentData":{"chartType":"bar","title":"Module Usage","xKey":"module","yKey":"count","data":[{"module":"FI","count":42},{"module":"MM","count":36}]},"aguiActions":[]}</a2ui>
+
+<a2ui>{"componentName":"ActionCard","componentData":{"title":"Next Step","description":"Choose what to do.","aguiActions":[{"label":"Generate Plan","intent":"GENERATE_PLAN","parameters":{"scope":"full"},"style":"primary"},{"label":"Refine Data","intent":"REFINE_DATA","parameters":{},"style":"default"}]},"aguiActions":[]}</a2ui>
+
+<a2ui>{"componentName":"Text","componentData":{"text":{"literalString":"## Summary\nMain findings are shown in the chart above."},"usageHint":"body"},"aguiActions":[]}</a2ui>
+
+Hard requirements:
+- Always wrap every block as <a2ui>{...}</a2ui>.
+- JSON must be valid (no comments, no trailing commas).
+- Use <thinking>...</thinking> only for internal reasoning.
 """
 
 
@@ -46,7 +73,7 @@ def _normalize_env() -> None:
     }
     for src, dst in mapping.items():
         if os.getenv(src) and not os.getenv(dst):
-            os.environ[dst] = os.environ[src]
+            os.environ[dst] = os.getenv(src, "")
 
 
 def _get_model_id() -> str:
@@ -57,31 +84,35 @@ def _get_model_id() -> str:
     )
 
 
+def _append_message(messages: list[dict[str, Any]], role: str, text: str) -> None:
+    cleaned = text.strip()
+    if not cleaned:
+        return
+
+    if messages and messages[-1]["role"] == role:
+        # Replace instead of concatenating to prevent unresolved same-role
+        # prompts from being stitched together.
+        messages[-1]["content"][0]["text"] = cleaned
+        return
+
+    messages.append({"role": role, "content": [{"text": cleaned}]})
+
+
 def _build_bedrock_messages(
     prompt: str,
     history: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     bedrock_messages: list[dict[str, Any]] = []
 
-    # Add history excluding the last user message (added separately as prompt)
     for msg in history[:-1]:
         text = msg.get("content", "").strip()
         if not text:
             continue
-        role = "user" if msg["role"] == "user" else "assistant"
-        # Skip consecutive same-role messages (Bedrock requires alternating)
-        if bedrock_messages and bedrock_messages[-1]["role"] == role:
-            # Merge into previous
-            bedrock_messages[-1]["content"][0]["text"] += "\n" + text
-        else:
-            bedrock_messages.append({"role": role, "content": [{"text": text}]})
+        role = "user" if msg.get("role") == "user" else "assistant"
+        _append_message(bedrock_messages, role, text)
 
-    # Add current prompt
     if prompt and prompt.strip():
-        if bedrock_messages and bedrock_messages[-1]["role"] == "user":
-            bedrock_messages[-1]["content"][0]["text"] += "\n" + prompt.strip()
-        else:
-            bedrock_messages.append({"role": "user", "content": [{"text": prompt.strip()}]})
+        _append_message(bedrock_messages, "user", prompt)
 
     return bedrock_messages
 
@@ -106,7 +137,7 @@ async def stream_bedrock_tokens(
             modelId=model_id,
             system=[{"text": SYSTEM_PROMPT}],
             messages=messages,
-            inferenceConfig={"maxTokens": 8192, "temperature": 0.7},
+            inferenceConfig={"maxTokens": 8192, "temperature": 0.2},
         )
 
         stream = response.get("stream")
