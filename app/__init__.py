@@ -1,2 +1,0 @@
-"""CodeGenie backend package."""
-

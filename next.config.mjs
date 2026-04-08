@@ -9,12 +9,9 @@ const nextConfig = {
     typedRoutes: true
   },
   webpack: (config) => {
-    config.resolve.alias = {
-      ...(config.resolve.alias ?? {}),
-      "markdown-it": path.join(__dirname, "src/lib/vendor/markdown-it.ts")
-    };
     return config;
   }
+
 };
 
 export default nextConfig;

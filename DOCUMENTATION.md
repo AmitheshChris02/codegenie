@@ -33,7 +33,7 @@ The app is built so the model can emit structured UI blocks, and the frontend ca
 - Tailwind CSS
 - @ag-ui/client + @ag-ui/core
 - @a2ui/web_core
-- Official Google A2UI React renderer bundle (vendored locally in `src/vendor/a2ui-react`)
+- @a2ui/react (Official Google library)
 
 ## 3. Repository layout (important)
 
@@ -62,8 +62,6 @@ Key frontend files:
 - `src/components/chat/MessageList.tsx`: chat block renderer.
 - `src/store/chatStore.ts`: conversation/message stream state.
 - `src/components/a2ui/registerCustomCatalog.tsx`: default + custom A2UI component registry.
-- `src/lib/a2ui-react.tsx`: `@a2ui/react` alias re-export.
-- `src/vendor/a2ui-react/index.js`: vendored official Google A2UI React renderer bundle.
 - `src/components/ui/*`: custom UI components (Markdown, Code, Diff, Chart, ActionCard, etc.).
 
 ## 4. End-to-end runtime flow
@@ -193,20 +191,14 @@ This app loads both:
 
 Custom registrations are in `src/components/a2ui/registerCustomCatalog.tsx`.
 
-## 8. `@a2ui/react` integration note
+### 8. `@a2ui/react` integration
 
-The app uses the official Google renderer bundle, but vendored locally.
+The app uses the official Google `@a2ui/react` library.
 
-Why:
+Previously, this was vendored locally due to a filesystem permission issue on Windows drives (`/mnt/c`) involving the `uc.micro` dependency. 
 
-- Direct npm install of `@a2ui/react` is blocked in this environment because of a filesystem permission issue creating `node_modules/uc.micro` (a transitive dependency path).
-
-Current workaround:
-
-- Vendored official bundle at `src/vendor/a2ui-react/index.js`.
-- Type alias export at `src/lib/a2ui-react.tsx`.
-- TS path alias maps `@a2ui/react` to local re-export.
-- Webpack alias maps `markdown-it` to local shim (`src/lib/vendor/markdown-it.ts`).
+**Solution:**
+The project was moved to the native Linux filesystem in WSL (`~/projects/codegenie`), where standard `npm install @a2ui/react` works correctly.
 
 ## 9. Markdown checkbox behavior
 

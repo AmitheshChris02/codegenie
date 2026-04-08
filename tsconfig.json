@@ -16,10 +16,9 @@
     "plugins": [{ "name": "next" }],
     "baseUrl": ".",
     "paths": {
-      "@a2ui/react": ["./src/lib/a2ui-react"],
-      "markdown-it": ["./src/lib/vendor/markdown-it"],
       "@/*": ["./src/*"]
     }
+
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
