@@ -6,9 +6,9 @@ from backend.models.ui_protocols import A2UIPayload
 
 class A2UISurfaceMessageBuilder:
     """
-    Builds official @a2ui/react ServerToClientMessage objects for a single surface per run.
-    First payload emits beginRendering + surfaceUpdate.
-    Subsequent payloads emit surfaceUpdate only.
+    Builds official @a2ui/react ServerToClientMessage objects.
+    Each payload gets its own surface so custom components are never
+    nested inside a Column (which causes A2UI schema validation errors).
     """
 
     _ALLOWED_COMPONENTS = {
@@ -38,14 +38,8 @@ class A2UISurfaceMessageBuilder:
     }
 
     def __init__(self, run_id: str) -> None:
-        self._surface_id = f"surface-{run_id}"
-        self._node_count = 0
-        self._started = False
-        self._child_ids: list[str] = []
-
-    @property
-    def surface_id(self) -> str:
-        return self._surface_id
+        self._run_id = run_id
+        self._surface_count = 0
 
     @staticmethod
     def _to_literal_value(value: Any) -> dict[str, Any]:
@@ -167,44 +161,30 @@ class A2UISurfaceMessageBuilder:
         return [{"id": node_id, "component": {component_name: component_data}}]
 
     def build_messages(self, payload: A2UIPayload) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        node_id = f"node-{self._node_count}"
-        self._node_count += 1
-        self._child_ids.append(node_id)
+        surface_id = f"surface-{self._run_id}-{self._surface_count}"
+        self._surface_count += 1
+        node_id = "root-node"
 
-        if not self._started:
-            messages.append(
-                {
-                    "beginRendering": {
-                        "surfaceId": self._surface_id,
-                        "root": "root",
-                    }
-                }
-            )
-            self._started = True
+        components = self._build_component_instances(node_id, payload)
+        # For Button, _normalize_button_data returns [text_node, button_node];
+        # the button node is last. For all others, the single node is first.
+        # Set the root to whichever node is the "main" component (last for Button, first otherwise).
+        root_component_id = components[-1]["id"] if len(components) > 1 else node_id
 
-        components: list[dict[str, Any]] = [
+        return [
             {
-                "id": "root",
-                "component": {
-                    "Column": {
-                        "children": {"explicitList": list(self._child_ids)}
-                    }
-                },
+                "beginRendering": {
+                    "surfaceId": surface_id,
+                    "root": root_component_id,
+                }
             },
-        ]
-        components.extend(self._build_component_instances(node_id, payload))
-
-        messages.append(
             {
                 "surfaceUpdate": {
-                    "surfaceId": self._surface_id,
+                    "surfaceId": surface_id,
                     "components": components,
                 }
-            }
-        )
-
-        return messages
+            },
+        ]
 
 
 def _extract_text_from_content(content: Any) -> str:

@@ -17,7 +17,7 @@ import MessageList from "./MessageList";
 
 const MODEL_BADGE = process.env.NEXT_PUBLIC_MODEL_NAME ?? "anthropic.claude-3-5-sonnet-20241022-v2:0";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8009";
-const A2UI_CUSTOM_EVENT_NAME = "A2UI_MESSAGES";
+const A2UI_CUSTOM_EVENT_NAME = "CODEGENIE_COMPONENT";
 
 registerCustomA2UIComponents();
 
@@ -37,139 +37,6 @@ function createAssistantMemoryMessage(content: string): AssistantMessage {
     role: "assistant",
     content,
   };
-}
-
-function isA2UIMessage(value: unknown): value is A2UITypes.ServerToClientMessage {
-  if (!value || typeof value !== "object") return false;
-  const message = value as Record<string, unknown>;
-  return (
-    "beginRendering" in message ||
-    "surfaceUpdate" in message ||
-    "dataModelUpdate" in message ||
-    "deleteSurface" in message
-  );
-}
-
-function tryParseJson(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  const trimmed = value.trim();
-  if (!trimmed) return value;
-  if (!(trimmed.startsWith("{") && trimmed.endsWith("}")) && !(trimmed.startsWith("[") && trimmed.endsWith("]"))) return value;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return value;
-  }
-}
-
-function normalizeA2UIMessages(value: unknown): A2UITypes.ServerToClientMessage[] {
-  const parsed = tryParseJson(value);
-  if (Array.isArray(parsed)) return parsed.filter(isA2UIMessage);
-  if (!parsed || typeof parsed !== "object") return [];
-  if (isA2UIMessage(parsed)) return [parsed];
-  const envelope = parsed as Record<string, unknown>;
-  if (Array.isArray(envelope.messages)) return envelope.messages.filter(isA2UIMessage);
-  if (Array.isArray(envelope.value)) return envelope.value.filter(isA2UIMessage);
-  if (envelope.value) return normalizeA2UIMessages(envelope.value);
-  return [];
-}
-
-function extractSurfaceIds(messages: A2UITypes.ServerToClientMessage[]): string[] {
-  const ids = new Set<string>();
-  for (const message of messages) {
-    if (message.beginRendering?.surfaceId) ids.add(String(message.beginRendering.surfaceId));
-    if (message.surfaceUpdate?.surfaceId) ids.add(String(message.surfaceUpdate.surfaceId));
-    if (message.dataModelUpdate?.surfaceId) ids.add(String(message.dataModelUpdate.surfaceId));
-  }
-  return Array.from(ids);
-}
-
-function getLiteralString(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!value || typeof value !== "object") return "";
-  const asRecord = value as Record<string, unknown>;
-  if (typeof asRecord.literalString === "string") return asRecord.literalString;
-  return "";
-}
-
-function summarizeComponent(componentName: string, rawProps: unknown): string | null {
-  const props = typeof rawProps === "object" && rawProps !== null ? (rawProps as Record<string, unknown>) : {};
-
-  if (componentName === "Text") {
-    const text = getLiteralString(props.text).trim();
-    return text || null;
-  }
-
-  if (componentName === "MarkdownBlock") {
-    const text = String(props.markdown ?? "").trim();
-    if (!text) return null;
-    return text.slice(0, 1200);
-  }
-
-  if (componentName === "CodeViewer") {
-    const filename = props.filename ? ` (${String(props.filename)})` : "";
-    const language = props.language ? ` [${String(props.language)}]` : "";
-    return `Code snippet${filename}${language}`;
-  }
-
-  if (componentName === "DiffViewer") {
-    const filename = props.filename ? ` (${String(props.filename)})` : "";
-    const language = props.language ? ` [${String(props.language)}]` : "";
-    return `Code diff${filename}${language}`;
-  }
-
-  if (componentName === "RechartGraph") {
-    const title = props.title ? `: ${String(props.title)}` : "";
-    const chartType = props.chartType ? ` (${String(props.chartType)})` : "";
-    return `Chart${chartType}${title}`;
-  }
-
-  if (componentName === "ActionCard") {
-    const title = String(props.title ?? "Action").trim();
-    const description = String(props.description ?? "").trim();
-    const actions = Array.isArray(props.aguiActions)
-      ? (props.aguiActions as Array<Record<string, unknown>>)
-          .map((item) => String(item.label ?? item.intent ?? ""))
-          .filter((v) => v.trim().length > 0)
-      : [];
-
-    const actionsPart = actions.length > 0 ? ` | Actions: ${actions.join(", ")}` : "";
-    return `${title}${description ? ` - ${description}` : ""}${actionsPart}`.trim();
-  }
-
-  if (componentName === "Button") {
-    const action = props.action as Record<string, unknown> | undefined;
-    if (action && typeof action.name === "string" && action.name.trim()) {
-      return `Button action: ${action.name}`;
-    }
-    return "Button action";
-  }
-
-  return null;
-}
-
-function extractA2UIContextSnippets(messages: A2UITypes.ServerToClientMessage[]): string[] {
-  const snippets: string[] = [];
-
-  for (const message of messages) {
-    const components = message.surfaceUpdate?.components;
-    if (!Array.isArray(components)) continue;
-
-    for (const componentInstance of components) {
-      const instance = componentInstance as { id?: unknown; component?: unknown };
-      if (instance.id === "root") continue;
-      if (!instance.component || typeof instance.component !== "object") continue;
-
-      const entries = Object.entries(instance.component as Record<string, unknown>);
-      if (entries.length === 0) continue;
-
-      const [componentName, componentProps] = entries[0];
-      const summary = summarizeComponent(componentName, componentProps);
-      if (summary && summary.trim()) snippets.push(summary.trim());
-    }
-  }
-
-  return Array.from(new Set(snippets));
 }
 
 function actionToPrompt(actionMessage: A2UITypes.A2UIClientEventMessage): string {
@@ -193,7 +60,7 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
   const agentRef = useRef<HttpAgent | null>(null);
   const activeThreadRef = useRef<string | null>(null);
 
-  const { processMessages, clearSurfaces } = useA2UIActions();
+  const { clearSurfaces } = useA2UIActions();
 
   const messages = useChatStore((state) => state.messages);
   const conversations = useChatStore((state) => state.conversations);
@@ -204,7 +71,7 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
   const addUserMessage = useChatStore((state) => state.addUserMessage);
   const startAssistantMessage = useChatStore((state) => state.startAssistantMessage);
   const appendTextDelta = useChatStore((state) => state.appendTextDelta);
-  const appendA2UISurface = useChatStore((state) => state.appendA2UISurface);
+  const appendA2UIComponent = useChatStore((state) => state.appendA2UIComponent);
   const setThinking = useChatStore((state) => state.setThinking);
   const finalizeMessage = useChatStore((state) => state.finalizeMessage);
   const reset = useChatStore((state) => state.reset);
@@ -272,17 +139,12 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
 
       const runId = uuidv4();
       const streamingId = startAssistantMessage();
-      const renderedSurfaces = new Set<string>();
-      const a2uiSnippetsForMemory: string[] = [];
       let assistantTextBuffer = "";
       let finalized = false;
 
       const persistAssistantMemory = () => {
         if (assistantTextBuffer.trim().length > 0) return;
-        if (a2uiSnippetsForMemory.length === 0) return;
-        const summary = Array.from(new Set(a2uiSnippetsForMemory)).join("\n\n").trim();
-        if (!summary) return;
-        agent.addMessage(createAssistantMemoryMessage(summary));
+        agent.addMessage(createAssistantMemoryMessage(assistantTextBuffer));
       };
 
       const finish = () => {
@@ -309,20 +171,15 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
         },
         onCustomEvent: ({ event }) => {
           if (event.name !== A2UI_CUSTOM_EVENT_NAME) return;
-          const rawPayload = event.value ?? (event as { data?: unknown }).data ?? (event as { rawEvent?: unknown }).rawEvent;
-          const a2uiMessages = normalizeA2UIMessages(rawPayload);
-          if (a2uiMessages.length === 0) return;
-
-          const snippets = extractA2UIContextSnippets(a2uiMessages);
-          if (snippets.length > 0) a2uiSnippetsForMemory.push(...snippets);
-
-          processMessages(a2uiMessages);
-          for (const surfaceId of extractSurfaceIds(a2uiMessages)) {
-            if (!renderedSurfaces.has(surfaceId)) {
-              appendA2UISurface(streamingId, surfaceId);
-              renderedSurfaces.add(surfaceId);
-            }
-          }
+          const raw = event.value ?? (event as { data?: unknown }).data;
+          if (!raw || typeof raw !== "object") return;
+          const payload = raw as { componentName?: unknown; componentData?: unknown; aguiActions?: unknown };
+          if (typeof payload.componentName !== "string") return;
+          appendA2UIComponent(streamingId, {
+            componentName: payload.componentName,
+            componentData: (typeof payload.componentData === "object" && payload.componentData !== null ? payload.componentData : {}) as Record<string, unknown>,
+            aguiActions: Array.isArray(payload.aguiActions) ? payload.aguiActions as import("@/types/protocols").A2UIAction[] : [],
+          });
         },
         onRunErrorEvent: ({ event }) => {
           appendTextDelta(streamingId, `\n\nError: ${event.message}`);
@@ -347,12 +204,11 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
     },
     [
       addUserMessage,
-      appendA2UISurface,
+      appendA2UIComponent,
       appendTextDelta,
       conversationId,
       ensureAgent,
       finalizeMessage,
-      processMessages,
       setConversationId,
       setThinking,
       startAssistantMessage,

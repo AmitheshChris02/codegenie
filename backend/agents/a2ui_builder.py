@@ -18,6 +18,8 @@ _COMPONENT_ALIASES: dict[str, str] = {
     "chart": "RechartGraph",
     "graph": "RechartGraph",
     "actionitems": "ActionCard",
+    "card": "ActionCard",
+    "text": "MarkdownBlock",
 }
 
 

@@ -20,7 +20,7 @@ from ag_ui.core import (
 from ag_ui.encoder import EventEncoder
 
 from backend.agents.a2ui_builder import StreamParser
-from backend.agents.agui_event_builder import A2UISurfaceMessageBuilder, build_prompt_and_history
+from backend.agents.agui_event_builder import build_prompt_and_history
 from backend.agents.strands_agent import stream_bedrock_tokens
 from backend.models.ui_protocols import A2UIPayload
 
@@ -56,7 +56,6 @@ async def chat_event_stream(
     )
 
     parser = StreamParser()
-    surface_builder = A2UISurfaceMessageBuilder(run_id)
 
     saw_a2ui = False
     buffered_text_chunks: list[str] = []
@@ -69,12 +68,15 @@ async def chat_event_stream(
             buffered_text_chunks.append(text)
 
     def _emit_component(payload: A2UIPayload) -> bytes:
-        msgs = surface_builder.build_messages(payload)
         return encoder.encode(
             CustomEvent(
                 type=EventType.CUSTOM,
-                name="A2UI_MESSAGES",
-                value={"messages": msgs},
+                name="CODEGENIE_COMPONENT",
+                value={
+                    "componentName": payload.componentName,
+                    "componentData": payload.componentData,
+                    "aguiActions": payload.aguiActions,
+                },
             )
         )
 

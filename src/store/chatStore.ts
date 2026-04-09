@@ -20,6 +20,7 @@ type ChatState = {
   startAssistantMessage: () => string;
   appendTextDelta: (id: string, delta: string) => void;
   appendA2UISurface: (id: string, surfaceId: string) => void;
+  appendA2UIComponent: (id: string, payload: import("@/types/protocols").A2UIPayload) => void;
   setThinking: (id: string, thinking: boolean) => void;
   finalizeMessage: (id: string) => void;
   reset: () => void;
@@ -81,6 +82,13 @@ export const useChatStore = create<ChatState>()(
         const msg = state.messages.find((m) => m.id === id);
         if (!msg) return;
         msg.content.push({ kind: "a2ui_surface", surfaceId });
+      }),
+
+    appendA2UIComponent: (id, payload) =>
+      set((state) => {
+        const msg = state.messages.find((m) => m.id === id);
+        if (!msg) return;
+        msg.content.push({ kind: "a2ui", payload });
       }),
 
     setThinking: (id, thinking) =>

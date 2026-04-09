@@ -14,25 +14,42 @@ interface Props {
 }
 
 export default function A2UIResolver({ payload }: Props) {
-  switch (payload.componentName) {
-    case "MarkdownBlock":
-      return <MarkdownBlock markdown={String(payload.componentData.markdown ?? "")} />;
+  // Normalise built-in A2UI component names the model sometimes emits
+  const name = (() => {
+    switch (payload.componentName) {
+      case "Text": return "MarkdownBlock";
+      case "Card": return "ActionCard";
+      default: return payload.componentName;
+    }
+  })();
+
+  const data = payload.componentData;
+
+  switch (name) {
+    case "MarkdownBlock": {
+      // Text component uses { text: { literalString: "..." } } or plain string
+      const raw = data.markdown ?? data.text;
+      const md = typeof raw === "object" && raw !== null
+        ? String((raw as Record<string, unknown>).literalString ?? "")
+        : String(raw ?? "");
+      return <MarkdownBlock markdown={md} />;
+    }
 
     case "CodeViewer":
       return (
         <CodeViewer
-          code={String(payload.componentData.code ?? "")}
-          language={String(payload.componentData.language ?? "plaintext")}
-          filename={payload.componentData.filename ? String(payload.componentData.filename) : undefined}
+          code={String(data.code ?? "")}
+          language={String(data.language ?? "plaintext")}
+          filename={data.filename ? String(data.filename) : undefined}
         />
       );
 
     case "ActionCard":
       return (
         <ActionCard
-          title={String(payload.componentData.title ?? "Action Card")}
-          description={String(payload.componentData.description ?? "")}
-          metadata={payload.componentData.metadata as Record<string, unknown> | undefined}
+          title={String(data.title ?? "Action Card")}
+          description={String(data.description ?? "")}
+          metadata={data.metadata as Record<string, unknown> | undefined}
           actions={payload.aguiActions}
           onAction={async () => undefined}
         />
@@ -41,23 +58,26 @@ export default function A2UIResolver({ payload }: Props) {
     case "RechartGraph":
       return (
         <RechartGraph
-          chartType={(payload.componentData.chartType as "bar" | "line" | "pie") ?? "bar"}
-          data={(payload.componentData.data as Array<Record<string, unknown>>) ?? []}
-          xKey={payload.componentData.xKey ? String(payload.componentData.xKey) : "name"}
-          yKey={payload.componentData.yKey ? String(payload.componentData.yKey) : "value"}
-          title={payload.componentData.title ? String(payload.componentData.title) : undefined}
+          chartType={(data.chartType as "bar" | "line" | "pie") ?? "bar"}
+          data={(data.data as Array<Record<string, unknown>>) ?? []}
+          xKey={data.xKey ? String(data.xKey) : "name"}
+          yKey={data.yKey ? String(data.yKey) : "value"}
+          title={data.title ? String(data.title) : undefined}
         />
       );
 
     case "DiffViewer":
       return (
         <DiffViewer
-          oldCode={String(payload.componentData.oldCode ?? "")}
-          newCode={String(payload.componentData.newCode ?? "")}
-          language={payload.componentData.language ? String(payload.componentData.language) : "text"}
-          filename={payload.componentData.filename ? String(payload.componentData.filename) : undefined}
+          oldCode={String(data.oldCode ?? "")}
+          newCode={String(data.newCode ?? "")}
+          language={data.language ? String(data.language) : "text"}
+          filename={data.filename ? String(data.filename) : undefined}
         />
       );
+
+    case "ThinkingBubble":
+      return null;
 
     default:
       return <ErrorFallback componentName={payload.componentName} />;

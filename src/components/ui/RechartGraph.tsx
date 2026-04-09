@@ -182,7 +182,8 @@ export default function RechartGraph({ chartType, data, xKey, yKey, title }: Pro
           </div>
         </div>
       ) : (
-        <ResponsiveContainer width="100%" height={320}>
+        <div style={{ width: "100%", height: 320 }}>
+          <ResponsiveContainer width="100%" height="100%">
           {chartType === "pie" ? (
             <PieChart margin={{ top: 12, right: 24, bottom: 16, left: 24 }}>
               <Pie
@@ -228,6 +229,7 @@ export default function RechartGraph({ chartType, data, xKey, yKey, title }: Pro
             </LineChart>
           )}
         </ResponsiveContainer>
+        </div>
       )}
     </div>
   );

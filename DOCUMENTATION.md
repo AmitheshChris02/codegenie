@@ -1,18 +1,22 @@
-# CodeGenie Chat: Current Build Documentation
+# CodeGenie Chat Documentation (AG-UI + A2UI)
 
-Last updated: April 7, 2026
+Last updated: April 9, 2026
 
-## 1. What this application is
+## 1. Overview
 
-CodeGenie Chat is a full-stack streaming chat application.
+CodeGenie Chat is a full-stack, streaming AI chat assistant with a component-first UI contract.
 
-- Backend: FastAPI + AG-UI protocol events + Strands/AWS Bedrock streaming.
-- Frontend: Next.js 14 + TypeScript + Zustand + AG-UI HttpAgent.
-- UI protocol: Google A2UI messages for dynamic component rendering.
+- Backend streams AG-UI protocol events over `text/event-stream`.
+- Model output is parsed into A2UI component payloads.
+- Frontend renders Google A2UI catalog components plus project custom components.
+- Follow-up prompts retain context from prior user and assistant turns.
 
-The app is built so the model can emit structured UI blocks, and the frontend can render them as surfaces while still showing text deltas in the chat transcript.
+Core product direction:
+- UI components are dominant in assistant responses.
+- Text is supporting content, not the primary output path.
+- Actionable UI (buttons/cards) is preferred over plain hyperlink text.
 
-## 2. Tech stack
+## 2. Tech Stack
 
 ### Backend
 
@@ -20,9 +24,9 @@ The app is built so the model can emit structured UI blocks, and the frontend ca
 - FastAPI
 - Uvicorn
 - Pydantic v2
-- boto3 (Bedrock runtime)
+- boto3 (AWS Bedrock runtime)
 - strands-agents
-- ag-ui-protocol (Python)
+- ag-ui-protocol
 
 ### Frontend
 
@@ -31,203 +35,169 @@ The app is built so the model can emit structured UI blocks, and the frontend ca
 - TypeScript 5
 - Zustand + Immer
 - Tailwind CSS
-- @ag-ui/client + @ag-ui/core
-- @a2ui/web_core
-- @a2ui/react (Official Google library)
+- `@ag-ui/client` + `@ag-ui/core`
+- `@a2ui/react` + `@a2ui/web_core`
+- Recharts (line/pie path)
 
-## 3. Repository layout (important)
+## 3. Repository Layout (Current)
 
-There are two `app` directories with different purposes.
+Important: the active backend package is `backend/` (not `app/`).
 
-- `app/` (repo root): Python backend package.
-- `src/app/`: Next.js App Router frontend.
+- `backend/`: FastAPI + AG-UI/A2UI orchestration
+- `src/`: Next.js frontend
 
 Key backend files:
-
-- `app/main.py`: FastAPI bootstrap, CORS, health check.
-- `app/api/endpoints/chat.py`: `POST /chat` streaming endpoint.
-- `app/utils/streaming.py`: AG-UI event stream orchestration.
-- `app/agents/strands_agent.py`: Strands + Bedrock streaming client.
-- `app/agents/a2ui_builder.py`: token parser (`<a2ui>`, `<thinking>`) + fallback repair.
-- `app/agents/agui_event_builder.py`: prompt/history shaping + A2UI surface message builder.
-- `app/models/ui_protocols.py`: local A2UI/AGUI helper models used in the stream parser.
+- `backend/main.py`: FastAPI app, CORS, router mount, health check
+- `backend/api/endpoints/chat.py`: `POST /chat` streaming endpoint
+- `backend/utils/streaming.py`: AG-UI event stream orchestration
+- `backend/agents/strands_agent.py`: Bedrock streaming and system prompt
+- `backend/agents/a2ui_builder.py`: token parser and payload normalization
+- `backend/agents/agui_event_builder.py`: prompt/history extraction and A2UI surface message builder
+- `backend/models/ui_protocols.py`: A2UI/AGUI helper models
 
 Key frontend files:
+- `src/app/chat/page.tsx`: chat route entry
+- `src/components/chat/ChatLayout.tsx`: runtime orchestration and AG-UI subscriber
+- `src/components/chat/MessageList.tsx`: message block renderer
+- `src/store/chatStore.ts`: chat/stream state
+- `src/components/a2ui/registerCustomCatalog.tsx`: default + custom A2UI registration
+- `src/components/ui/*`: Markdown, Code, Diff, Chart, ActionCard, etc.
 
-- `src/app/layout.tsx`: global layout/fonts/providers.
-- `src/app/providers.tsx`: theme provider.
-- `src/app/page.tsx`: redirect to `/chat`.
-- `src/app/chat/page.tsx`: chat page entry.
-- `src/components/chat/ChatLayout.tsx`: primary runtime orchestration.
-- `src/components/chat/MessageList.tsx`: chat block renderer.
-- `src/store/chatStore.ts`: conversation/message stream state.
-- `src/components/a2ui/registerCustomCatalog.tsx`: default + custom A2UI component registry.
-- `src/components/ui/*`: custom UI components (Markdown, Code, Diff, Chart, ActionCard, etc.).
+## 4. End-to-End Runtime Flow
 
-## 4. End-to-end runtime flow
+### 4.1 User Prompt Flow
 
-## 4.1 User text prompt flow
+1. User submits prompt in `MessageInput`.
+2. `ChatLayout` appends a user message and invokes `HttpAgent.runAgent(...)`.
+3. Frontend sends AG-UI `RunAgentInput` to `POST /chat`.
+4. Backend streams AG-UI events (`RunStarted`, `StepStarted`, reasoning/text/custom, `RunFinished`).
+5. `StreamParser` parses model tokens into:
+   - `thinking`
+   - `text_delta`
+   - `a2ui`
+6. Each `A2UIPayload` is converted into official A2UI server messages (`beginRendering` + `surfaceUpdate`).
+7. Backend emits AG-UI custom event: `A2UI_MESSAGES`.
+8. Frontend processes those messages with `processMessages(...)` and renders by `surfaceId` via `A2UIRenderer`.
 
-1. User submits text in `MessageInput`.
-2. `ChatLayout` appends a user message to Zustand.
-3. `HttpAgent` (`@ag-ui/client`) calls `POST /chat` with `RunAgentInput`.
-4. FastAPI endpoint (`/chat`) streams AG-UI events encoded by `EventEncoder`.
-5. `chat_event_stream` starts run events and streams model output.
-6. Model token stream is parsed by `build_stream_events`:
-   - `thinking` events
-   - `text_delta` events
-   - `a2ui` payload events
-7. Backend converts each `A2UIPayload` into official A2UI server messages:
-   - first payload: `beginRendering`, then `surfaceUpdate`
-   - later payloads: `surfaceUpdate`
-8. Backend emits custom AG-UI event:
-   - `name = "A2UI_MESSAGES"`
-   - `value = { "messages": [ ... ] }`
-9. Frontend subscriber handles events:
-   - text deltas -> append streamed text
-   - custom A2UI messages -> `processMessages(...)` in A2UI provider
-   - extracted `surfaceId`s -> appended as `a2ui_surface` blocks
-10. `MessageList` renders `A2UIRenderer` for each `a2ui_surface` block.
+### 4.2 UI Action Flow
 
-## 4.2 UI action flow
-
-1. User clicks an action in an A2UI-rendered component.
-2. A2UI action is dispatched through provider `onAction`.
+1. User clicks action in A2UI component.
+2. A2UI action is routed through `A2UIProvider onAction`.
 3. `ChatLayout` starts a new run with `forwardedProps.a2uiAction`.
-4. Backend `build_prompt_and_history(...)` detects the action envelope and creates an action-specific prompt.
-5. Agent streams next response, potentially updating surfaces again.
+4. Backend converts action envelope to prompt context.
+5. Agent produces next component-first response.
 
-## 5. Backend architecture details
+### 4.3 Follow-up Context Rules
 
-## 5.1 API contract
+- User prompts are preserved through AG-UI message history.
+- Assistant A2UI output is summarized into memory snippets on frontend for follow-up continuity.
+- Backend no longer stitches prior same-role prompts together incorrectly.
 
-`POST /chat` currently accepts AG-UI `RunAgentInput` (not the old `ChatRequest`).
+## 5. Backend Behavior Details
 
-- Input type: `ag_ui.core.RunAgentInput`
-- Output type: AG-UI event stream (`text/event-stream`) encoded by `ag_ui.encoder.EventEncoder`
+### 5.1 API Contract
 
-## 5.2 Stream parser behavior
+`POST /chat`:
+- Input: `ag_ui.core.RunAgentInput`
+- Output: streamed AG-UI events (`text/event-stream`)
 
-`app/agents/a2ui_builder.py` parses model token output incrementally.
+### 5.2 Stream Output Policy (`backend/utils/streaming.py`)
 
-- Recognizes `<a2ui> ... </a2ui>` blocks.
-- Recognizes `<thinking> ... </thinking>` blocks.
-- Handles malformed A2UI JSON with repair logic (especially MarkdownBlock cases).
-- Converts plain text into fallback `MarkdownBlock` A2UI payloads so UI still renders.
+- Component-first rendering is enforced.
+- Plain text generated by model is converted into `MarkdownBlock` component payload.
+- Bedrock errors are emitted as `ActionCard` + `RunErrorEvent`.
+- Empty/no-output generations emit a fallback `ActionCard` (no silent blank response).
+- Reasoning events are emitted through AG-UI reasoning event types.
 
-## 5.3 Surface message builder
+### 5.3 A2UI Parsing and Normalization (`backend/agents/a2ui_builder.py`)
 
-`A2UISurfaceMessageBuilder` in `app/agents/agui_event_builder.py` maintains one surface per run.
+- Parses `<a2ui>...</a2ui>` and `<thinking>...</thinking>` incrementally.
+- Repairs malformed JSON best-effort.
+- Normalizes aliases (`chart`, `barchart`, `graph` -> `RechartGraph`).
+- Normalizes chart payloads:
+  - chart type coercion
+  - data coercion (array/object/string)
+  - x/y key inference
+  - numeric extraction from mixed values (e.g., `"58 implementations"`)
+- Converts markdown links to actionable `ActionCard` when needed.
 
-- Surface id: `surface-{run_id}`
-- Root component id: `root`
-- Layout: root `Column` with `children.explicitList`
-- Each payload appends a new `node-{n}` child component
+### 5.4 Surface Builder (`backend/agents/agui_event_builder.py`)
 
-## 5.4 Agent layer
+- Uses one A2UI surface per payload to avoid nesting/validation issues.
+- Ensures only allowed components are emitted.
+- Normalizes `Text`, `Button`, and `ActionCard` payload shapes.
 
-`BedrockStreamingAgent` in `app/agents/strands_agent.py`:
+### 5.5 Model Prompt Contract (`backend/agents/strands_agent.py`)
 
-- Normalizes env vars from `AWS_BEDROCK_*` to standard AWS names.
-- Attempts Strands SDK first.
-- Falls back to direct Bedrock `converse_stream` token streaming.
-- Uses a system prompt that strongly instructs A2UI block output.
+System prompt enforces:
+- A2UI block output format
+- component-dominant responses
+- chart/action requirements
+- minimal plain text outside structured UI blocks
 
-## 6. Frontend architecture details
+## 6. Frontend Behavior Details
 
-## 6.1 Main runtime
+### 6.1 Runtime (`src/components/chat/ChatLayout.tsx`)
 
-`src/components/chat/ChatLayout.tsx` handles:
+- Creates/reuses `HttpAgent` per thread.
+- Subscribes to AG-UI events.
+- Handles:
+  - reasoning toggles
+  - text deltas
+  - `A2UI_MESSAGES` custom events
+  - run completion/error
+- Normalizes incoming custom payload envelopes and extracts surface IDs.
 
-- HttpAgent initialization per thread.
-- Streaming subscriber callbacks.
-- Thinking state toggles.
-- Text delta accumulation.
-- A2UI custom payload normalization (object/array/string/envelope).
-- Surface id extraction and render block insertion.
+### 6.2 Message Rendering (`src/components/chat/MessageList.tsx`)
 
-## 6.2 Message rendering
+Assistant block order:
+- `thinking` -> thinking indicator
+- `text` -> streaming/final markdown
+- `a2ui_surface` -> `A2UIRenderer`
+- `a2ui` -> fallback resolver path
 
-`MessageList` renders assistant content blocks in this order:
+Primary rendering path is A2UI surfaces.
 
-- `thinking` -> `ThinkingIndicator`
-- `text` -> `StreamingText` while active, `MarkdownBlock` when done
-- `a2ui_surface` -> `A2UIRenderer surfaceId=...`
-- `a2ui` -> legacy fallback through `A2UIResolver`
+### 6.3 A2UI Registration (`src/components/a2ui/registerCustomCatalog.tsx`)
 
-Note: Current primary path is `a2ui_surface` + `A2UIRenderer`.
+- Initializes Google default catalog.
+- Registers custom components:
+  - `MarkdownBlock`
+  - `CodeViewer`
+  - `DiffViewer`
+  - `RechartGraph`
+  - `ActionCard`
+  - `ThinkingBubble`
+- Includes unwrapping logic for A2UI literal wrappers (`literalString`, `literalNumber`, `explicitList`) before passing chart data/keys.
 
-## 6.3 State model
+## 7. Chart Rendering in Current Build
 
-`chatStore.ts` tracks:
+`RechartGraph` currently uses a hybrid strategy:
+- `bar`: deterministic HTML/CSS bar renderer (primary path for visibility robustness)
+- `line` and `pie`: Recharts
 
-- `messages`
-- `conversations`
-- `conversationId`
-- `isStreaming`
-- `currentStreamingId`
+Common safeguards:
+- numeric coercion from mixed payload formats
+- inferred x/y key resolution
+- explicit no-numeric fallback message
 
-Key mutations:
+## 8. Environment Variables
 
-- `startAssistantMessage`
-- `appendTextDelta`
-- `appendA2UISurface`
-- `setThinking`
-- `finalizeMessage`
-- `reset`
-
-## 7. A2UI catalog in this app
-
-This app loads both:
-
-1. Google default catalog via `initializeDefaultCatalog()`.
-2. Custom components registered on top:
-   - `MarkdownBlock`
-   - `CodeViewer`
-   - `DiffViewer`
-   - `RechartGraph`
-   - `ActionCard`
-   - `ThinkingBubble`
-
-Custom registrations are in `src/components/a2ui/registerCustomCatalog.tsx`.
-
-### 8. `@a2ui/react` integration
-
-The app uses the official Google `@a2ui/react` library.
-
-Previously, this was vendored locally due to a filesystem permission issue on Windows drives (`/mnt/c`) involving the `uc.micro` dependency. 
-
-**Solution:**
-The project was moved to the native Linux filesystem in WSL (`~/projects/codegenie`), where standard `npm install @a2ui/react` works correctly.
-
-## 9. Markdown checkbox behavior
-
-There are two checkbox behaviors:
-
-1. True A2UI `CheckBox` component nodes (Google catalog) -> interactive via A2UI state model.
-2. Markdown task-list checkboxes in `MarkdownBlock` -> now locally interactive in UI via custom renderer state.
-
-Markdown task-list checkbox state is local client UI state only and is not persisted back to backend state.
-
-## 10. Environment variables
-
-Do not commit real secrets. Use your own values in `.env`.
-
-Backend:
+### Backend
 
 - `AWS_REGION` or `AWS_BEDROCK_REGION`
 - `AWS_ACCESS_KEY_ID` or `AWS_BEDROCK_ACCESS_KEY`
 - `AWS_SECRET_ACCESS_KEY` or `AWS_BEDROCK_SECRET_KEY`
 - `BEDROCK_MODEL_ID` (optional)
-- `AWS_BEDROCK_INFERENCE_PROFILE_ARN` (optional model fallback)
-- `FRONTEND_ORIGIN` (optional CORS origin)
+- `AWS_BEDROCK_INFERENCE_PROFILE_ARN` (optional)
+- `FRONTEND_ORIGIN` (optional, default `http://localhost:3000`)
 
-Frontend:
+### Frontend
 
-- `NEXT_PUBLIC_API_BASE_URL` (currently expected `http://127.0.0.1:8009`)
-- `NEXT_PUBLIC_MODEL_NAME` (badge text only)
+- `NEXT_PUBLIC_API_BASE_URL` (default `http://127.0.0.1:8009`)
+- `NEXT_PUBLIC_MODEL_NAME` (header badge text)
 
-## 11. Local development
+## 9. Local Development
 
 Install:
 
@@ -239,7 +209,7 @@ py -m pip install -r requirements.txt
 Run backend:
 
 ```bash
-py -m uvicorn app.main:app --host 127.0.0.1 --port 8009
+py -m uvicorn backend.main:app --host 127.0.0.1 --port 8009
 ```
 
 Run frontend:
@@ -249,12 +219,11 @@ npm run dev
 ```
 
 Open:
-
 - `http://localhost:3000/chat`
 
-## 12. Verification commands
+## 10. Verification Commands
 
-Frontend type check:
+Frontend type-check:
 
 ```bash
 npx tsc --noEmit
@@ -263,43 +232,57 @@ npx tsc --noEmit
 Backend compile check:
 
 ```bash
-py -m compileall app
+py -m compileall backend
 ```
 
 Health check:
 
-```bash
+```http
 GET http://127.0.0.1:8009/health
 ```
 
-## 13. Known legacy paths in repo
+## 11. Troubleshooting
 
-The following files exist from earlier transport/runtime flow and are not the main current path:
+### 11.1 Empty assistant response on follow-up
 
+- Current build emits fallback `ActionCard` when neither A2UI nor text is produced.
+- Verify backend path points to latest `backend/utils/streaming.py` process.
+
+### 11.2 Chart labels visible but bars/lines not visible
+
+- For bar charts, the component uses HTML/CSS bars.
+- If requesting line/pie and Recharts is still visually empty, verify payload numeric fields and fallback to bar for diagnosis.
+- Confirm payload reaches `RechartGraph` with resolved `data/xKey/yKey`.
+
+### 11.3 DevTools "EventStream" tab appears empty
+
+This can happen even when streaming works, depending on browser handling of fetch-based SSE-like responses.
+
+Use these checks instead:
+1. Confirm `/chat` response header `content-type: text/event-stream`.
+2. Check `Response` tab for streamed AG-UI frames.
+3. Confirm frontend receives `A2UI_MESSAGES` in `onCustomEvent`.
+
+### 11.4 Encoding/build errors (UTF-8)
+
+- Source files must be valid UTF-8.
+- If Next.js reports invalid UTF-8, rewrite affected file as UTF-8 without corruption.
+
+## 12. Adding a New Custom A2UI Component
+
+1. Create UI component in `src/components/ui`.
+2. Register in `src/components/a2ui/registerCustomCatalog.tsx`.
+3. Add backend allowance/normalization in `backend/agents/agui_event_builder.py` and/or `backend/agents/a2ui_builder.py`.
+4. Update model prompt rules in `backend/agents/strands_agent.py` so it emits the component.
+5. Run:
+   - `npx tsc --noEmit`
+   - `py -m compileall backend`
+
+## 13. Legacy/Non-primary Paths
+
+These files exist but are not the primary runtime transport path:
 - `src/utils/sseClient.ts`
 - `src/utils/aguiDispatcher.ts`
 - `src/utils/historySerializer.ts`
 
-Current runtime path is AG-UI `HttpAgent` in `ChatLayout.tsx`.
-
-## 14. How to add a new custom A2UI component
-
-1. Build the UI component in `src/components/ui`.
-2. Add component name to both protocol models:
-   - `app/models/ui_protocols.py`
-   - `src/types/protocols.ts`
-3. Update backend mapping (if needed) in:
-   - `app/agents/agui_event_builder.py` (`a2ui_payload_to_text` and/or payload props)
-4. Register renderer in `src/components/a2ui/registerCustomCatalog.tsx`.
-5. Ensure model prompt supports emitting that component JSON in `SYSTEM_PROMPT` (`strands_agent.py`).
-6. Run checks (`npx tsc --noEmit`, `py -m compileall app`).
-
-## 15. Operational troubleshooting
-
-If A2UI surfaces do not render:
-
-1. Confirm frontend is pointing to the updated backend URL (`NEXT_PUBLIC_API_BASE_URL`).
-2. Restart frontend after `.env` changes.
-3. Confirm backend `/chat` stream includes `CUSTOM` event `A2UI_MESSAGES`.
-4. Confirm payload contains `messages` with `beginRendering` and `surfaceUpdate`.
-5. Check for stale backend processes on old ports (commonly `8000`).
+Primary transport path is AG-UI `HttpAgent` in `ChatLayout.tsx`.
