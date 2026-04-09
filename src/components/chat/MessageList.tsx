@@ -1,7 +1,7 @@
 "use client";
 
 import { A2UIRenderer } from "@a2ui/react";
-import type { ChatMessage } from "@/types/protocols";
+import type { A2UIAction, A2UIPayload, ChatMessage } from "@/types/protocols";
 
 import A2UIResolver from "./A2UIResolver";
 import ThinkingIndicator from "./ThinkingIndicator";
@@ -12,6 +12,7 @@ type Props = {
   messages: ChatMessage[];
   currentStreamingId: string | null;
   showSkeleton: boolean;
+  onCustomAction?: (action: A2UIAction, payload: A2UIPayload) => Promise<void>;
 };
 
 function Skeleton() {
@@ -24,7 +25,7 @@ function Skeleton() {
   );
 }
 
-export default function MessageList({ messages, currentStreamingId, showSkeleton }: Props) {
+export default function MessageList({ messages, currentStreamingId, showSkeleton, onCustomAction }: Props) {
   if (showSkeleton) return <Skeleton />;
 
   if (messages.length === 0) {
@@ -77,7 +78,7 @@ export default function MessageList({ messages, currentStreamingId, showSkeleton
                   }
 
                   if (block.kind === "a2ui") {
-                    return <A2UIResolver key={`${message.id}-${index}`} payload={block.payload} />;
+                    return <A2UIResolver key={`${message.id}-${index}`} payload={block.payload} onAction={onCustomAction} />;
                   }
 
                   return null;
@@ -90,4 +91,3 @@ export default function MessageList({ messages, currentStreamingId, showSkeleton
     </div>
   );
 }
-

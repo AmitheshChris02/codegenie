@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 
 import { registerCustomA2UIComponents } from "@/components/a2ui/registerCustomCatalog";
+import type { A2UIAction, A2UIPayload } from "@/types/protocols";
 import { useChatStore } from "@/store/chatStore";
 
 import MessageInput from "./MessageInput";
@@ -244,6 +245,26 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
     await runAssistantTurn({ actionMessage });
   }, [runAssistantTurn]);
 
+  const handleCustomComponentAction = useCallback(
+    async (action: A2UIAction, sourcePayload: A2UIPayload) => {
+      const actionMessage: A2UITypes.A2UIClientEventMessage = {
+        userAction: {
+          name: String(action.intent || "ACTION"),
+          sourceComponentId: "custom-action-card",
+          surfaceId: `custom-${conversationId ?? "surface"}`,
+          timestamp: new Date().toISOString(),
+          context: {
+            ...(action.parameters ?? {}),
+            _sourceComponent: sourcePayload.componentName,
+          },
+        },
+      };
+
+      await runAssistantTurn({ actionMessage });
+    },
+    [conversationId, runAssistantTurn]
+  );
+
   useEffect(() => {
     actionHandlerRef.current = handleAction;
     return () => {
@@ -346,7 +367,7 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
 
           <main className="flex-1 overflow-y-auto px-5 pb-40 pt-6">
             <div className="mx-auto w-full max-w-[920px]">
-              <MessageList messages={messages} currentStreamingId={currentStreamingId} showSkeleton={showSkeleton} />
+              <MessageList messages={messages} currentStreamingId={currentStreamingId} showSkeleton={showSkeleton} onCustomAction={handleCustomComponentAction} />
               <div ref={bottomRef} className="h-1 w-full" />
             </div>
           </main>

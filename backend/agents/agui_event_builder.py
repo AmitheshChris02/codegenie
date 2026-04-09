@@ -164,6 +164,41 @@ class A2UISurfaceMessageBuilder:
         button_component = {"id": node_id, "component": {"Button": data}}
         return [text_component, button_component]
 
+    def _to_literal_array_binding(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            if isinstance(value.get("path"), str):
+                return {"path": value["path"]}
+            literal = value.get("literalArray")
+            if isinstance(literal, list):
+                return {"literalArray": [str(v) for v in literal]}
+
+        if isinstance(value, list):
+            return {"literalArray": [str(v) for v in value]}
+
+        if isinstance(value, str) and value.strip():
+            return {"literalArray": [value.strip()]}
+
+        return {"literalArray": []}
+
+    def _to_literal_number_binding(self, value: Any, fallback: float = 0.0) -> dict[str, Any]:
+        if isinstance(value, dict):
+            if isinstance(value.get("path"), str):
+                return {"path": value["path"]}
+            literal = value.get("literalNumber")
+            if isinstance(literal, (int, float)) and not isinstance(literal, bool):
+                return {"literalNumber": float(literal)}
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return {"literalNumber": float(value)}
+
+        if isinstance(value, str):
+            try:
+                return {"literalNumber": float(value.strip())}
+            except ValueError:
+                pass
+
+        return {"literalNumber": fallback}
+
     def _normalize_checkbox_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
         data = dict(component_data)
         label = data.get("label", data.get("text", "Item"))
@@ -172,6 +207,110 @@ class A2UISurfaceMessageBuilder:
             "label": self._to_literal_string_binding(label, "Item"),
             "value": self._to_literal_bool_binding(value, False),
         }
+
+    def _normalize_text_field_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
+        data = dict(component_data)
+        label = data.get("label", data.get("title", "Input"))
+        text_value = data.get("text", data.get("value", ""))
+        text_field_type = str(data.get("textFieldType", "shortText"))
+        if text_field_type not in {"date", "longText", "number", "shortText", "obscured"}:
+            text_field_type = "shortText"
+
+        normalized: dict[str, Any] = {
+            "label": self._to_literal_string_binding(label, "Input"),
+            "textFieldType": text_field_type,
+        }
+
+        if text_value is not None and str(text_value) != "":
+            normalized["text"] = self._to_literal_string_binding(text_value, "")
+
+        validation_regexp = data.get("validationRegexp")
+        if isinstance(validation_regexp, str) and validation_regexp.strip():
+            normalized["validationRegexp"] = validation_regexp
+
+        return normalized
+
+    def _normalize_datetime_input_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
+        data = dict(component_data)
+        value = data.get("value", data.get("text", ""))
+        normalized: dict[str, Any] = {
+            "value": self._to_literal_string_binding(value, ""),
+        }
+
+        if isinstance(data.get("enableDate"), bool):
+            normalized["enableDate"] = data["enableDate"]
+        if isinstance(data.get("enableTime"), bool):
+            normalized["enableTime"] = data["enableTime"]
+
+        return normalized
+
+    def _normalize_multiple_choice_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
+        data = dict(component_data)
+        raw_options = data.get("options", data.get("choices", data.get("items", [])))
+
+        if isinstance(raw_options, dict):
+            raw_options = [
+                {"label": k, "value": v}
+                for k, v in raw_options.items()
+            ]
+
+        if not isinstance(raw_options, list):
+            raw_options = []
+
+        options: list[dict[str, Any]] = []
+        for index, option in enumerate(raw_options):
+            if isinstance(option, dict):
+                label_raw = option.get("label") or option.get("text") or option.get("title") or option.get("name") or option.get("value")
+                value_raw = option.get("value") or label_raw
+            else:
+                label_raw = option
+                value_raw = option
+
+            label_text = self._extract_text(label_raw, f"Option {index + 1}").strip() or f"Option {index + 1}"
+            value_text = self._extract_text(value_raw, label_text).strip() or label_text
+
+            options.append(
+                {
+                    "label": self._to_literal_string_binding(label_text, label_text),
+                    "value": value_text,
+                }
+            )
+
+        if not options:
+            options.append(
+                {
+                    "label": self._to_literal_string_binding("Option 1", "Option 1"),
+                    "value": "option_1",
+                }
+            )
+
+        selections_raw = data.get("selections", data.get("selected", data.get("value", [])))
+        normalized: dict[str, Any] = {
+            "selections": self._to_literal_array_binding(selections_raw),
+            "options": options,
+        }
+
+        max_allowed = data.get("maxAllowedSelections")
+        if isinstance(max_allowed, int) and max_allowed > 0:
+            normalized["maxAllowedSelections"] = max_allowed
+
+        return normalized
+
+    def _normalize_slider_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
+        data = dict(component_data)
+        value = data.get("value", data.get("currentValue", data.get("selected", 0)))
+        normalized: dict[str, Any] = {
+            "value": self._to_literal_number_binding(value, 0.0),
+        }
+
+        min_value = data.get("minValue")
+        max_value = data.get("maxValue")
+        if isinstance(min_value, (int, float)) and not isinstance(min_value, bool):
+            normalized["minValue"] = float(min_value)
+        if isinstance(max_value, (int, float)) and not isinstance(max_value, bool):
+            normalized["maxValue"] = float(max_value)
+
+        return normalized
 
     def _build_card_data(
         self,
@@ -312,6 +451,18 @@ class A2UISurfaceMessageBuilder:
 
         if component_name == "CheckBox":
             return [{"id": node_id, "component": {"CheckBox": self._normalize_checkbox_data(component_data)}}]
+
+        if component_name == "TextField":
+            return [{"id": node_id, "component": {"TextField": self._normalize_text_field_data(component_data)}}]
+
+        if component_name == "DateTimeInput":
+            return [{"id": node_id, "component": {"DateTimeInput": self._normalize_datetime_input_data(component_data)}}]
+
+        if component_name == "MultipleChoice":
+            return [{"id": node_id, "component": {"MultipleChoice": self._normalize_multiple_choice_data(component_data)}}]
+
+        if component_name == "Slider":
+            return [{"id": node_id, "component": {"Slider": self._normalize_slider_data(component_data)}}]
 
         if component_name == "ActionCard":
             data = dict(component_data)

@@ -1,6 +1,6 @@
 "use client";
 
-import type { A2UIPayload } from "@/types/protocols";
+import type { A2UIAction, A2UIPayload } from "@/types/protocols";
 
 import ActionCard from "../ui/ActionCard";
 import CodeViewer from "../ui/CodeViewer";
@@ -10,6 +10,7 @@ import RechartGraph from "../ui/RechartGraph";
 
 interface Props {
   payload: A2UIPayload;
+  onAction?: (action: A2UIAction, payload: A2UIPayload) => Promise<void>;
 }
 
 function str(value: unknown, fallback = ""): string {
@@ -22,7 +23,7 @@ function str(value: unknown, fallback = ""): string {
   return fallback;
 }
 
-export default function A2UIResolver({ payload }: Props) {
+export default function A2UIResolver({ payload, onAction }: Props) {
   const { componentName, componentData: d, aguiActions } = payload;
 
   switch (componentName) {
@@ -68,7 +69,10 @@ export default function A2UIResolver({ payload }: Props) {
           description={str(d.description)}
           metadata={d.metadata as Record<string, unknown> | undefined}
           actions={aguiActions}
-          onAction={async () => undefined}
+          onAction={async (action) => {
+            if (!onAction) return;
+            await onAction(action, payload);
+          }}
         />
       );
 
