@@ -1,5 +1,6 @@
 import json
 import re
+import ast
 from math import isfinite
 from typing import Any, Generator
 
@@ -39,6 +40,58 @@ def _repair_json(raw: str) -> str:
         return raw
     except json.JSONDecodeError:
         return raw
+
+
+
+def _looks_like_protocol_payload(raw: str) -> bool:
+    lowered = raw.lower()
+    return "componentname" in lowered and "componentdata" in lowered
+
+
+def _sanitize_js_expressions(raw: str) -> str:
+    sanitized = raw
+    sanitized = re.sub(
+        r"\s*\+\s*new\s+Date\(\)\.(?:toLocaleString|toISOString)\(\)",
+        "",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"new\s+Date\(\)\.(?:toLocaleString|toISOString)\(\)",
+        '"CURRENT_TIMESTAMP"',
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
+
+
+def _try_parse_dict(raw: str) -> dict[str, Any] | None:
+    candidates: list[str] = []
+    repaired = _repair_json(raw)
+    sanitized = _sanitize_js_expressions(repaired)
+    candidates.extend([repaired, sanitized, raw])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    literal_candidates = [sanitized, raw]
+    for candidate in literal_candidates:
+        py_candidate = re.sub(r"\btrue\b", "True", candidate, flags=re.IGNORECASE)
+        py_candidate = re.sub(r"\bfalse\b", "False", py_candidate, flags=re.IGNORECASE)
+        py_candidate = re.sub(r"\bnull\b", "None", py_candidate, flags=re.IGNORECASE)
+        try:
+            parsed = ast.literal_eval(py_candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except (ValueError, SyntaxError):
+            continue
+
+    return None
 
 
 def _extract_markdown_links(markdown: str) -> list[tuple[str, str]]:
@@ -224,17 +277,18 @@ def _normalize_component(
 
 def _parse_a2ui_block(raw: str) -> A2UIPayload | None:
     raw = raw.strip()
-    repaired = _repair_json(raw)
+    data = _try_parse_dict(raw)
 
-    try:
-        data = json.loads(repaired)
-    except json.JSONDecodeError:
-        return A2UIPayload(
-            componentName="MarkdownBlock",
-            componentData={"markdown": raw},
-        )
-
-    if not isinstance(data, dict):
+    if data is None:
+        # Prevent raw protocol blobs from leaking as visible markdown.
+        if _looks_like_protocol_payload(raw):
+            return A2UIPayload(
+                componentName="Text",
+                componentData={
+                    "text": {"literalString": "Structured response received. Some fields were incompatible and were skipped."},
+                    "usageHint": "caption",
+                },
+            )
         return A2UIPayload(
             componentName="MarkdownBlock",
             componentData={"markdown": raw},
@@ -258,7 +312,6 @@ def _parse_a2ui_block(raw: str) -> A2UIPayload | None:
         componentData=safe_component_data,
         aguiActions=safe_actions,
     )
-
 
 class StreamParser:
     """
@@ -333,5 +386,3 @@ class StreamParser:
         if self._buf:
             yield ("text_delta", self._buf)
             self._buf = ""
-
-

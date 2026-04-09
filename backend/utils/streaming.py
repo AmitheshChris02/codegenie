@@ -168,26 +168,47 @@ async def chat_event_stream(
             aguiActions=[],
         ))
     elif buffered_text:
+        def _looks_like_protocol_text(text: str) -> bool:
+            lowered = text.lower()
+            return "componentname" in lowered and "componentdata" in lowered
+
         # The model sometimes emits bare JSON blobs without <a2ui> tags.
-        # Split the buffer into JSON component blobs and plain text segments.
-        import re as _re
+        # Split the buffer into component blobs and plain text segments,
+        # while ignoring braces inside quoted strings.
         segments: list[tuple[str, str]] = []
         last = 0
         depth = 0
         blob_start: int | None = None
+        quote_char: str | None = None
+        escape = False
+
         for i, ch in enumerate(buffered_text):
+            if quote_char is not None:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote_char:
+                    quote_char = None
+                continue
+
+            if ch in {'\"', "'"}:
+                quote_char = ch
+                continue
+
             if ch == "{":
                 if depth == 0:
                     if i > last:
                         segments.append(("text", buffered_text[last:i]))
                     blob_start = i
                 depth += 1
-            elif ch == "}":
+            elif ch == "}" and depth > 0:
                 depth -= 1
                 if depth == 0 and blob_start is not None:
                     segments.append(("json", buffered_text[blob_start:i + 1]))
                     last = i + 1
                     blob_start = None
+
         if last < len(buffered_text):
             segments.append(("text", buffered_text[last:]))
 
@@ -195,12 +216,20 @@ async def chat_event_stream(
             content = content.strip()
             if not content:
                 continue
-            if kind == "json":
+
+            payload: A2UIPayload | None = None
+            if kind == "json" or _looks_like_protocol_text(content):
                 payload = _parse_a2ui_block(content)
-                if payload and payload.componentName != "MarkdownBlock":
-                    saw_a2ui = True
-                    yield _emit_component(payload)
-                    continue
+
+            if payload and payload.componentName != "MarkdownBlock":
+                saw_a2ui = True
+                yield _emit_component(payload)
+                continue
+
+            # Avoid showing raw protocol/schema blobs to end users.
+            if _looks_like_protocol_text(content):
+                continue
+
             yield _emit_component(A2UIPayload(
                 componentName="MarkdownBlock",
                 componentData={"markdown": content},
@@ -251,4 +280,3 @@ async def chat_event_stream(
             thread_id=thread_id,
         )
     )
-

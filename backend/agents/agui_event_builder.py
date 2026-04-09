@@ -92,10 +92,26 @@ class A2UISurfaceMessageBuilder:
         if isinstance(value, dict):
             if isinstance(value.get("literalString"), str):
                 return value["literalString"]
-            for key in ("text", "label", "title", "content", "description"):
+
+            # Handle list-item style payloads such as primaryText/secondaryText.
+            primary_raw = value.get("primaryText") or value.get("primary") or value.get("headline")
+            secondary_raw = value.get("secondaryText") or value.get("subtitle") or value.get("subtext")
+            primary = self._extract_text(primary_raw, "").strip() if primary_raw is not None else ""
+            secondary = self._extract_text(secondary_raw, "").strip() if secondary_raw is not None else ""
+            if primary and secondary:
+                return f"{primary}\n{secondary}"
+            if primary:
+                return primary
+            if secondary:
+                return secondary
+
+            for key in ("text", "label", "title", "content", "description", "name", "value"):
                 nested = value.get(key)
-                if isinstance(nested, str) and nested.strip():
-                    return nested
+                if nested is None:
+                    continue
+                nested_text = self._extract_text(nested, "").strip()
+                if nested_text:
+                    return nested_text
         if value is None:
             return fallback
         return str(value)
