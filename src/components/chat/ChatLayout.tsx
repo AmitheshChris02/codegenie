@@ -17,7 +17,6 @@ import MessageList from "./MessageList";
 
 const MODEL_BADGE = process.env.NEXT_PUBLIC_MODEL_NAME ?? "anthropic.claude-3-5-sonnet-20241022-v2:0";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8009";
-const A2UI_CUSTOM_EVENT_NAME = "CODEGENIE_COMPONENT";
 
 registerCustomA2UIComponents();
 
@@ -60,7 +59,7 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
   const agentRef = useRef<HttpAgent | null>(null);
   const activeThreadRef = useRef<string | null>(null);
 
-  const { clearSurfaces } = useA2UIActions();
+  const { clearSurfaces, processMessages } = useA2UIActions();
 
   const messages = useChatStore((state) => state.messages);
   const conversations = useChatStore((state) => state.conversations);
@@ -72,6 +71,7 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
   const startAssistantMessage = useChatStore((state) => state.startAssistantMessage);
   const appendTextDelta = useChatStore((state) => state.appendTextDelta);
   const appendA2UIComponent = useChatStore((state) => state.appendA2UIComponent);
+  const appendA2UISurface = useChatStore((state) => state.appendA2UISurface);
   const setThinking = useChatStore((state) => state.setThinking);
   const finalizeMessage = useChatStore((state) => state.finalizeMessage);
   const reset = useChatStore((state) => state.reset);
@@ -170,16 +170,35 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
           appendTextDelta(streamingId, delta);
         },
         onCustomEvent: ({ event }) => {
-          if (event.name !== A2UI_CUSTOM_EVENT_NAME) return;
-          const raw = event.value ?? (event as { data?: unknown }).data;
-          if (!raw || typeof raw !== "object") return;
-          const payload = raw as { componentName?: unknown; componentData?: unknown; aguiActions?: unknown };
-          if (typeof payload.componentName !== "string") return;
-          appendA2UIComponent(streamingId, {
-            componentName: payload.componentName,
-            componentData: (typeof payload.componentData === "object" && payload.componentData !== null ? payload.componentData : {}) as Record<string, unknown>,
-            aguiActions: Array.isArray(payload.aguiActions) ? payload.aguiActions as import("@/types/protocols").A2UIAction[] : [],
-          });
+          if (event.name === "CODEGENIE_COMPONENT") {
+            // Custom component: render directly via A2UIResolver
+            const raw = event.value ?? (event as { data?: unknown }).data;
+            if (!raw || typeof raw !== "object") return;
+            const payload = raw as { componentName?: unknown; componentData?: unknown; aguiActions?: unknown };
+            if (typeof payload.componentName !== "string") return;
+            appendA2UIComponent(streamingId, {
+              componentName: payload.componentName,
+              componentData: (typeof payload.componentData === "object" && payload.componentData !== null ? payload.componentData : {}) as Record<string, unknown>,
+              aguiActions: Array.isArray(payload.aguiActions) ? payload.aguiActions as import("@/types/protocols").A2UIAction[] : [],
+            });
+          } else if (event.name === "A2UI_MESSAGES") {
+            // Built-in A2UI component: render via A2UIRenderer
+            const raw = event.value ?? (event as { data?: unknown }).data;
+            if (!raw || typeof raw !== "object") return;
+            const envelope = raw as Record<string, unknown>;
+            const msgs = Array.isArray(envelope.messages) ? envelope.messages : [];
+            if (msgs.length === 0) return;
+            try {
+              processMessages(msgs as import("@a2ui/react").Types.ServerToClientMessage[]);
+              for (const msg of msgs) {
+                const m = msg as Record<string, unknown>;
+                const surfaceId = (m.beginRendering as Record<string, unknown> | undefined)?.surfaceId as string | undefined;
+                if (surfaceId) appendA2UISurface(streamingId, surfaceId);
+              }
+            } catch {
+              // swallow schema validation errors for unsupported built-ins
+            }
+          }
         },
         onRunErrorEvent: ({ event }) => {
           appendTextDelta(streamingId, `\n\nError: ${event.message}`);
@@ -205,10 +224,12 @@ function ChatLayoutShell({ actionHandlerRef }: { actionHandlerRef: React.Mutable
     [
       addUserMessage,
       appendA2UIComponent,
+      appendA2UISurface,
       appendTextDelta,
       conversationId,
       ensureAgent,
       finalizeMessage,
+      processMessages,
       setConversationId,
       setThinking,
       startAssistantMessage,

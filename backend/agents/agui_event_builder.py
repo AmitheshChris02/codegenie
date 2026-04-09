@@ -7,8 +7,8 @@ from backend.models.ui_protocols import A2UIPayload
 class A2UISurfaceMessageBuilder:
     """
     Builds official @a2ui/react ServerToClientMessage objects.
-    Each payload gets its own surface so custom components are never
-    nested inside a Column (which causes A2UI schema validation errors).
+    Each payload is rendered on its own surface to avoid cross-component
+    schema coupling issues.
     """
 
     _ALLOWED_COMPONENTS = {
@@ -23,6 +23,7 @@ class A2UISurfaceMessageBuilder:
         "TextField",
         "DateTimeInput",
         "MultipleChoice",
+        "Slider",
         "Image",
         "Icon",
         "Video",
@@ -53,13 +54,67 @@ class A2UISurfaceMessageBuilder:
             return {"literalString": value}
         return {"literalString": json.dumps(value)}
 
+    @staticmethod
+    def _to_literal_string_binding(value: Any, fallback: str = "") -> dict[str, Any]:
+        if isinstance(value, dict):
+            if isinstance(value.get("literalString"), str):
+                return {"literalString": value["literalString"]}
+            if isinstance(value.get("path"), str):
+                return {"path": value["path"]}
+            if "text" in value:
+                return {"literalString": str(value.get("text") or fallback)}
+        if isinstance(value, str):
+            return {"literalString": value}
+        if value is None:
+            return {"literalString": fallback}
+        return {"literalString": str(value)}
+
+    @staticmethod
+    def _to_literal_bool_binding(value: Any, fallback: bool = False) -> dict[str, Any]:
+        if isinstance(value, dict):
+            if isinstance(value.get("literalBoolean"), bool):
+                return {"literalBoolean": value["literalBoolean"]}
+            if isinstance(value.get("path"), str):
+                return {"path": value["path"]}
+        if isinstance(value, bool):
+            return {"literalBoolean": value}
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "1", "checked", "done"}:
+                return {"literalBoolean": True}
+            if lowered in {"false", "no", "0", "unchecked", "todo"}:
+                return {"literalBoolean": False}
+        return {"literalBoolean": fallback}
+
+    def _extract_text(self, value: Any, fallback: str = "") -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            if isinstance(value.get("literalString"), str):
+                return value["literalString"]
+            for key in ("text", "label", "title", "content", "description"):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested
+        if value is None:
+            return fallback
+        return str(value)
+
+    def _make_text_node(self, node_id: str, text: str, usage_hint: str = "body") -> dict[str, Any]:
+        return {
+            "id": node_id,
+            "component": {
+                "Text": {
+                    "text": {"literalString": text},
+                    "usageHint": usage_hint if usage_hint in {"h1", "h2", "h3", "h4", "h5", "caption", "body"} else "body",
+                }
+            },
+        }
+
     def _normalize_text_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
         data = dict(component_data)
         raw_text = data.get("text", data.get("markdown", ""))
-        if isinstance(raw_text, dict):
-            data["text"] = raw_text
-        else:
-            data["text"] = {"literalString": str(raw_text)}
+        data["text"] = self._to_literal_string_binding(raw_text)
         usage_hint = data.get("usageHint")
         if usage_hint not in {"h1", "h2", "h3", "h4", "h5", "caption", "body"}:
             data["usageHint"] = "body"
@@ -104,18 +159,121 @@ class A2UISurfaceMessageBuilder:
             return [{"id": node_id, "component": {"Button": data}}]
 
         label_id = f"{node_id}-label"
-        text_component = {
-            "id": label_id,
-            "component": {
-                "Text": {
-                    "text": {"literalString": str(label or "Action")},
-                    "usageHint": "body",
-                }
-            },
-        }
+        text_component = self._make_text_node(label_id, str(label or "Action"))
         data["child"] = label_id
         button_component = {"id": node_id, "component": {"Button": data}}
         return [text_component, button_component]
+
+    def _normalize_checkbox_data(self, component_data: dict[str, Any]) -> dict[str, Any]:
+        data = dict(component_data)
+        label = data.get("label", data.get("text", "Item"))
+        value = data.get("value", data.get("checked", False))
+        return {
+            "label": self._to_literal_string_binding(label, "Item"),
+            "value": self._to_literal_bool_binding(value, False),
+        }
+
+    def _build_card_data(
+        self,
+        node_id: str,
+        component_data: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        data = dict(component_data)
+        child = data.get("child")
+        if isinstance(child, str) and child.strip():
+            return [{"id": node_id, "component": {"Card": {"child": child}}}]
+
+        child_id = f"{node_id}-child"
+        child_text = self._extract_text(
+            data.get("content") or data.get("text") or data.get("title") or data.get("description"),
+            "Card content",
+        )
+        child_node = self._make_text_node(child_id, child_text)
+        card_node = {"id": node_id, "component": {"Card": {"child": child_id}}}
+        return [card_node, child_node]
+
+    def _build_container_data(
+        self,
+        node_id: str,
+        component_name: str,
+        component_data: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        data = dict(component_data)
+        child_nodes: list[dict[str, Any]] = []
+        child_ids: list[str] = []
+
+        raw_children = data.get("children", data.get("items", []))
+
+        if isinstance(raw_children, dict):
+            explicit = raw_children.get("explicitList")
+            if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):
+                container_props: dict[str, Any] = {"children": {"explicitList": explicit}}
+                if component_name == "List":
+                    container_props["direction"] = data.get("direction", "vertical")
+                if component_name in {"Row", "Column", "List"} and "alignment" in data:
+                    container_props["alignment"] = data.get("alignment")
+                if component_name == "Row" and "distribution" in data:
+                    container_props["distribution"] = data.get("distribution")
+                container_node = {"id": node_id, "component": {component_name: container_props}}
+                return [container_node]
+            raw_children = []
+
+        if not isinstance(raw_children, list):
+            raw_children = [raw_children] if raw_children else []
+
+        for index, child in enumerate(raw_children):
+            child_id = f"{node_id}-child-{index}"
+
+            if isinstance(child, dict) and "componentName" in child:
+                nested_payload = A2UIPayload(
+                    componentName=str(child.get("componentName") or "Text"),
+                    componentData=child.get("componentData") if isinstance(child.get("componentData"), dict) else {},
+                    aguiActions=child.get("aguiActions") if isinstance(child.get("aguiActions"), list) else [],
+                )
+                nested_nodes = self._build_component_instances(child_id, nested_payload)
+                child_nodes.extend(nested_nodes)
+                child_ids.append(child_id)
+                continue
+
+            if isinstance(child, dict) and (
+                "checked" in child or "value" in child or str(child.get("type", "")).lower() == "checkbox"
+            ):
+                child_nodes.append({
+                    "id": child_id,
+                    "component": {"CheckBox": self._normalize_checkbox_data(child)},
+                })
+                child_ids.append(child_id)
+                continue
+
+            child_text = self._extract_text(child, "")
+            if child_text.strip():
+                child_nodes.append(self._make_text_node(child_id, child_text.strip()))
+                child_ids.append(child_id)
+
+        if not child_ids:
+            placeholder_id = f"{node_id}-child-0"
+            placeholder = str(data.get("emptyText") or "No items")
+            child_nodes.append(self._make_text_node(placeholder_id, placeholder))
+            child_ids.append(placeholder_id)
+
+        container_props: dict[str, Any] = {
+            "children": {"explicitList": child_ids}
+        }
+
+        if component_name == "List":
+            direction = data.get("direction", "vertical")
+            container_props["direction"] = direction if direction in {"vertical", "horizontal"} else "vertical"
+
+        if component_name in {"Row", "Column", "List"} and data.get("alignment") in {"start", "center", "end", "stretch"}:
+            container_props["alignment"] = data.get("alignment")
+
+        if component_name == "Row" and data.get("distribution") in {
+            "start", "center", "end", "spaceBetween", "spaceAround", "spaceEvenly"
+        }:
+            container_props["distribution"] = data.get("distribution")
+
+        container_node = {"id": node_id, "component": {component_name: container_props}}
+        return [container_node, *child_nodes]
 
     def _build_component_instances(
         self,
@@ -152,11 +310,23 @@ class A2UISurfaceMessageBuilder:
         if component_name == "Button":
             return self._normalize_button_data(node_id, component_data, agui_actions)
 
+        if component_name == "CheckBox":
+            return [{"id": node_id, "component": {"CheckBox": self._normalize_checkbox_data(component_data)}}]
+
         if component_name == "ActionCard":
             data = dict(component_data)
             if "aguiActions" not in data and agui_actions:
                 data["aguiActions"] = agui_actions
             return [{"id": node_id, "component": {"ActionCard": data}}]
+
+        if component_name in {"Row", "Column", "List"}:
+            return self._build_container_data(node_id, component_name, component_data)
+
+        if component_name == "Card":
+            return self._build_card_data(node_id, component_data)
+
+        if component_name == "Divider":
+            return [{"id": node_id, "component": {"Divider": {}}}]
 
         return [{"id": node_id, "component": {component_name: component_data}}]
 
@@ -166,16 +336,12 @@ class A2UISurfaceMessageBuilder:
         node_id = "root-node"
 
         components = self._build_component_instances(node_id, payload)
-        # For Button, _normalize_button_data returns [text_node, button_node];
-        # the button node is last. For all others, the single node is first.
-        # Set the root to whichever node is the "main" component (last for Button, first otherwise).
-        root_component_id = components[-1]["id"] if len(components) > 1 else node_id
 
         return [
             {
                 "beginRendering": {
                     "surfaceId": surface_id,
-                    "root": root_component_id,
+                    "root": node_id,
                 }
             },
             {

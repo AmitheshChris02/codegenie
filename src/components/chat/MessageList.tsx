@@ -1,5 +1,6 @@
 "use client";
 
+import { A2UIRenderer } from "@a2ui/react";
 import type { ChatMessage } from "@/types/protocols";
 
 import A2UIResolver from "./A2UIResolver";

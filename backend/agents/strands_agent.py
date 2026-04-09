@@ -30,6 +30,8 @@ CATALOG-FIRST POLICY:
 COMPONENT DOMINANCE RULES:
 - For analytical/data prompts: include at least one visualization component (RechartGraph) plus supporting cards/text.
 - For task/workflow prompts: include actionable UI (ActionCard and/or Button) with aguiActions.
+- For checklist/todo/readiness prompts: you MUST include standard catalog built-ins CheckBox + List (not markdown checklists).
+- For forms/input prompts: prefer TextField, DateTimeInput, MultipleChoice, Slider.
 - Avoid hyperlink-only action items in markdown; convert actions into buttons/cards.
 - Keep long narrative text short; structure content using components.
 

@@ -18,8 +18,6 @@ _COMPONENT_ALIASES: dict[str, str] = {
     "chart": "RechartGraph",
     "graph": "RechartGraph",
     "actionitems": "ActionCard",
-    "card": "ActionCard",
-    "text": "MarkdownBlock",
 }
 
 
@@ -148,7 +146,7 @@ def _normalize_chart_payload(component_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _maybe_convert_markdown_links_to_action_card(component_name: str, component_data: dict[str, Any], agui_actions: list[dict[str, Any]]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
-    if component_name not in {"MarkdownBlock", "Text"}:
+    if component_name not in {"MarkdownBlock"}:
         return component_name, component_data, agui_actions
 
     if agui_actions:

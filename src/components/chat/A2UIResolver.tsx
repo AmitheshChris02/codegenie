@@ -5,7 +5,6 @@ import type { A2UIPayload } from "@/types/protocols";
 import ActionCard from "../ui/ActionCard";
 import CodeViewer from "../ui/CodeViewer";
 import DiffViewer from "../ui/DiffViewer";
-import ErrorFallback from "../ui/ErrorFallback";
 import MarkdownBlock from "../ui/MarkdownBlock";
 import RechartGraph from "../ui/RechartGraph";
 
@@ -13,73 +12,67 @@ interface Props {
   payload: A2UIPayload;
 }
 
+function str(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    if (typeof o.literalString === "string") return o.literalString;
+  }
+  return fallback;
+}
+
 export default function A2UIResolver({ payload }: Props) {
-  // Normalise built-in A2UI component names the model sometimes emits
-  const name = (() => {
-    switch (payload.componentName) {
-      case "Text": return "MarkdownBlock";
-      case "Card": return "ActionCard";
-      default: return payload.componentName;
-    }
-  })();
+  const { componentName, componentData: d, aguiActions } = payload;
 
-  const data = payload.componentData;
-
-  switch (name) {
+  switch (componentName) {
     case "MarkdownBlock": {
-      // Text component uses { text: { literalString: "..." } } or plain string
-      const raw = data.markdown ?? data.text;
-      const md = typeof raw === "object" && raw !== null
-        ? String((raw as Record<string, unknown>).literalString ?? "")
-        : String(raw ?? "");
-      return <MarkdownBlock markdown={md} />;
+      const raw = d.markdown ?? d.text;
+      return <MarkdownBlock markdown={str(raw)} />;
     }
 
     case "CodeViewer":
       return (
         <CodeViewer
-          code={String(data.code ?? "")}
-          language={String(data.language ?? "plaintext")}
-          filename={data.filename ? String(data.filename) : undefined}
-        />
-      );
-
-    case "ActionCard":
-      return (
-        <ActionCard
-          title={String(data.title ?? "Action Card")}
-          description={String(data.description ?? "")}
-          metadata={data.metadata as Record<string, unknown> | undefined}
-          actions={payload.aguiActions}
-          onAction={async () => undefined}
-        />
-      );
-
-    case "RechartGraph":
-      return (
-        <RechartGraph
-          chartType={(data.chartType as "bar" | "line" | "pie") ?? "bar"}
-          data={(data.data as Array<Record<string, unknown>>) ?? []}
-          xKey={data.xKey ? String(data.xKey) : "name"}
-          yKey={data.yKey ? String(data.yKey) : "value"}
-          title={data.title ? String(data.title) : undefined}
+          code={str(d.code)}
+          language={str(d.language, "plaintext")}
+          filename={d.filename ? str(d.filename) : undefined}
         />
       );
 
     case "DiffViewer":
       return (
         <DiffViewer
-          oldCode={String(data.oldCode ?? "")}
-          newCode={String(data.newCode ?? "")}
-          language={data.language ? String(data.language) : "text"}
-          filename={data.filename ? String(data.filename) : undefined}
+          oldCode={str(d.oldCode)}
+          newCode={str(d.newCode)}
+          language={str(d.language, "text")}
+          filename={d.filename ? str(d.filename) : undefined}
         />
       );
 
-    case "ThinkingBubble":
-      return null;
+    case "RechartGraph":
+      return (
+        <RechartGraph
+          chartType={(str(d.chartType, "bar") as "bar" | "line" | "pie")}
+          data={(d.data as Array<Record<string, unknown>>) ?? []}
+          xKey={str(d.xKey, "name")}
+          yKey={str(d.yKey, "value")}
+          title={d.title ? str(d.title) : undefined}
+        />
+      );
+
+    case "ActionCard":
+      return (
+        <ActionCard
+          title={str(d.title, "Action")}
+          description={str(d.description)}
+          metadata={d.metadata as Record<string, unknown> | undefined}
+          actions={aguiActions}
+          onAction={async () => undefined}
+        />
+      );
 
     default:
-      return <ErrorFallback componentName={payload.componentName} />;
+      return null;
   }
 }
