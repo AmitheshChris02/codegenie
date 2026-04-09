@@ -1,288 +1,263 @@
-# CodeGenie Chat Documentation (AG-UI + A2UI)
+﻿# CodeGenie: AG UI + Google A2UI Integration Documentation
 
 Last updated: April 9, 2026
 
-## 1. Overview
+## 1. Objective
 
-CodeGenie Chat is a full-stack, streaming AI chat assistant with a component-first UI contract.
+This chat application is designed to be a component-first AI assistant:
 
-- Backend streams AG-UI protocol events over `text/event-stream`.
-- Model output is parsed into A2UI component payloads.
-- Frontend renders Google A2UI catalog components plus project custom components.
-- Follow-up prompts retain context from prior user and assistant turns.
+- AG UI (CopilotKit) drives the response event stream.
+- Google A2UI renders built-in catalog UI components whenever possible.
+- Custom components are used when catalog components are not enough.
+- Responses prioritize visual and actionable UI over long plain text.
 
-Core product direction:
-- UI components are dominant in assistant responses.
-- Text is supporting content, not the primary output path.
-- Actionable UI (buttons/cards) is preferred over plain hyperlink text.
+The target behavior is similar to modern AI assistants (ChatGPT, Claude, Gemini) but with stronger structured UI output.
 
-## 2. Tech Stack
+## 2. Current Behavior Requirements
 
-### Backend
+### Response style
 
-- Python 3.10+
-- FastAPI
-- Uvicorn
-- Pydantic v2
-- boto3 (AWS Bedrock runtime)
-- strands-agents
-- ag-ui-protocol
+- Prefer UI components as the dominant response format.
+- Keep text concise and supportive (minimal filler, limited emoji usage).
+- Render true tables/charts/cards/checklists/actions instead of plain text lists.
+- Use full message width correctly and avoid clipped/misaligned content.
 
-### Frontend
+### Context handling
 
-- Next.js 14.2
-- React 18
-- TypeScript 5
-- Zustand + Immer
-- Tailwind CSS
-- `@ag-ui/client` + `@ag-ui/core`
-- `@a2ui/react` + `@a2ui/web_core`
-- Recharts (line/pie path)
+- Follow-up prompts should use thread context.
+- Each answer must be generated for the current question only.
+- Prior answers should not be duplicated into later responses unless explicitly needed.
 
-## 3. Repository Layout (Current)
+## 3. Architecture
 
-Important: the active backend package is `backend/` (not `app/`).
+## Frontend
 
-- `backend/`: FastAPI + AG-UI/A2UI orchestration
-- `src/`: Next.js frontend
+- `src/components/chat/ChatLayout.tsx`
+  - Chat shell.
+  - Handles custom action callbacks from rendered UI.
+- `src/components/chat/MessageList.tsx`
+  - Renders chat messages.
+  - Routes AG UI/A2UI payloads to resolver components.
+- `src/components/chat/A2UIResolver.tsx`
+  - Resolves and renders A2UI built-ins.
+  - Falls back to registered custom components when needed.
+- `src/components/a2ui/registerCustomCatalog.tsx`
+  - Registers custom catalog components used by fallback/custom responses.
+- `src/components/ui/RechartGraph.tsx`
+  - Custom chart renderer for bar/line/area/pie-like graph payloads.
 
-Key backend files:
-- `backend/main.py`: FastAPI app, CORS, router mount, health check
-- `backend/api/endpoints/chat.py`: `POST /chat` streaming endpoint
-- `backend/utils/streaming.py`: AG-UI event stream orchestration
-- `backend/agents/strands_agent.py`: Bedrock streaming and system prompt
-- `backend/agents/a2ui_builder.py`: token parser and payload normalization
-- `backend/agents/agui_event_builder.py`: prompt/history extraction and A2UI surface message builder
-- `backend/models/ui_protocols.py`: A2UI/AGUI helper models
+## Backend
 
-Key frontend files:
-- `src/app/chat/page.tsx`: chat route entry
-- `src/components/chat/ChatLayout.tsx`: runtime orchestration and AG-UI subscriber
-- `src/components/chat/MessageList.tsx`: message block renderer
-- `src/store/chatStore.ts`: chat/stream state
-- `src/components/a2ui/registerCustomCatalog.tsx`: default + custom A2UI registration
-- `src/components/ui/*`: Markdown, Code, Diff, Chart, ActionCard, etc.
+- `backend/agents/agui_event_builder.py`
+  - Normalizes model output into AG UI event stream payloads.
+  - Emits component messages and text events in the expected format.
+- `backend/utils/streaming.py`
+  - Streams events to frontend in order.
+- `app/agents/strands_agent.py`
+  - Agent orchestration and model/tool execution.
 
-## 4. End-to-End Runtime Flow
+## 4. AG UI Event Strategy
 
-### 4.1 User Prompt Flow
+The backend emits a complete run lifecycle so frontend EventStream is meaningful and renderers have enough data.
 
-1. User submits prompt in `MessageInput`.
-2. `ChatLayout` appends a user message and invokes `HttpAgent.runAgent(...)`.
-3. Frontend sends AG-UI `RunAgentInput` to `POST /chat`.
-4. Backend streams AG-UI events (`RunStarted`, `StepStarted`, reasoning/text/custom, `RunFinished`).
-5. `StreamParser` parses model tokens into:
-   - `thinking`
-   - `text_delta`
-   - `a2ui`
-6. Each `A2UIPayload` is converted into official A2UI server messages (`beginRendering` + `surfaceUpdate`).
-7. Backend emits AG-UI custom event: `A2UI_MESSAGES`.
-8. Frontend processes those messages with `processMessages(...)` and renders by `surfaceId` via `A2UIRenderer`.
+### Text events
 
-### 4.2 UI Action Flow
+- start text block
+- stream text chunks
+- end text block
 
-1. User clicks action in A2UI component.
-2. A2UI action is routed through `A2UIProvider onAction`.
-3. `ChatLayout` starts a new run with `forwardedProps.a2uiAction`.
-4. Backend converts action envelope to prompt context.
-5. Agent produces next component-first response.
+### UI events
 
-### 4.3 Follow-up Context Rules
+Two custom UI channels are supported:
 
-- User prompts are preserved through AG-UI message history.
-- Assistant A2UI output is summarized into memory snippets on frontend for follow-up continuity.
-- Backend no longer stitches prior same-role prompts together incorrectly.
+- `A2UI_MESSAGES`: for Google A2UI built-in catalog components.
+- `CODEGENIE_COMPONENT`: for custom catalog components (charts, richer cards, advanced widgets).
 
-## 5. Backend Behavior Details
+### Action events (client to server)
 
-### 5.1 API Contract
+- Button/menu/list action clicks create an AG UI-compatible client event payload.
+- Payload is routed through the same run flow so actions can produce new structured responses.
 
-`POST /chat`:
-- Input: `ag_ui.core.RunAgentInput`
-- Output: streamed AG-UI events (`text/event-stream`)
+## 5. Built-in vs Custom Component Policy
 
-### 5.2 Stream Output Policy (`backend/utils/streaming.py`)
+Component selection priority:
 
-- Component-first rendering is enforced.
-- Plain text generated by model is converted into `MarkdownBlock` component payload.
-- Bedrock errors are emitted as `ActionCard` + `RunErrorEvent`.
-- Empty/no-output generations emit a fallback `ActionCard` (no silent blank response).
-- Reasoning events are emitted through AG-UI reasoning event types.
+1. Use Google A2UI built-in catalog component if it can express the response well.
+2. Use custom registered component only if built-in coverage is insufficient.
+3. Use plain text as the final fallback.
 
-### 5.3 A2UI Parsing and Normalization (`backend/agents/a2ui_builder.py`)
+### Built-in patterns expected in responses
 
-- Parses `<a2ui>...</a2ui>` and `<thinking>...</thinking>` incrementally.
-- Repairs malformed JSON best-effort.
-- Normalizes aliases (`chart`, `barchart`, `graph` -> `RechartGraph`).
-- Normalizes chart payloads:
-  - chart type coercion
-  - data coercion (array/object/string)
-  - x/y key inference
-  - numeric extraction from mixed values (e.g., `"58 implementations"`)
-- Converts markdown links to actionable `ActionCard` when needed.
+- Text blocks
+- Cards/containers
+- Lists and list items
+- Buttons/action controls
+- Inputs (for interactive flows)
+- Multiple-choice/question blocks (when schema-compatible)
 
-### 5.4 Surface Builder (`backend/agents/agui_event_builder.py`)
+### Custom patterns
 
-- Uses one A2UI surface per payload to avoid nesting/validation issues.
-- Ensures only allowed components are emitted.
-- Normalizes `Text`, `Button`, and `ActionCard` payload shapes.
+- Recharts visualizations
+- Specialized composite cards
+- Domain-specific widgets requiring custom layout/logic
 
-### 5.5 Model Prompt Contract (`backend/agents/strands_agent.py`)
+## 6. Fixes Applied (Behavioral)
 
-System prompt enforces:
-- A2UI block output format
-- component-dominant responses
-- chart/action requirements
-- minimal plain text outside structured UI blocks
+## A. Repeated/combined answers across questions
 
-## 6. Frontend Behavior Details
+Problem:
 
-### 6.1 Runtime (`src/components/chat/ChatLayout.tsx`)
+- Q2 returned Q1 answer.
+- Q3 returned combined Q1 + Q2 + Q3 content.
 
-- Creates/reuses `HttpAgent` per thread.
-- Subscribes to AG-UI events.
-- Handles:
-  - reasoning toggles
-  - text deltas
-  - `A2UI_MESSAGES` custom events
-  - run completion/error
-- Normalizes incoming custom payload envelopes and extracts surface IDs.
+Fix intent:
 
-### 6.2 Message Rendering (`src/components/chat/MessageList.tsx`)
+- Reset per-run streaming buffers.
+- Build final answer from current run output only.
+- Preserve conversation context separately from rendered answer accumulation.
 
-Assistant block order:
-- `thinking` -> thinking indicator
-- `text` -> streaming/final markdown
-- `a2ui_surface` -> `A2UIRenderer`
-- `a2ui` -> fallback resolver path
+Result:
 
-Primary rendering path is A2UI surfaces.
+- Follow-up context is still available, but output is no longer duplicated across turns.
 
-### 6.3 A2UI Registration (`src/components/a2ui/registerCustomCatalog.tsx`)
+## B. Built-in components not rendering
 
-- Initializes Google default catalog.
-- Registers custom components:
-  - `MarkdownBlock`
-  - `CodeViewer`
-  - `DiffViewer`
-  - `RechartGraph`
-  - `ActionCard`
-  - `ThinkingBubble`
-- Includes unwrapping logic for A2UI literal wrappers (`literalString`, `literalNumber`, `explicitList`) before passing chart data/keys.
+Problem:
 
-## 7. Chart Rendering in Current Build
+- Payloads degraded to plain text.
 
-`RechartGraph` currently uses a hybrid strategy:
-- `bar`: deterministic HTML/CSS bar renderer (primary path for visibility robustness)
-- `line` and `pie`: Recharts
+Fix intent:
 
-Common safeguards:
-- numeric coercion from mixed payload formats
-- inferred x/y key resolution
-- explicit no-numeric fallback message
+- Normalize payloads to expected A2UI schema structure.
+- Ensure resolver receives valid component name + props shape.
+- Keep fallback path to custom components explicit.
 
-## 8. Environment Variables
+## C. Action buttons not triggering follow-up
 
-### Backend
+Problem:
 
-- `AWS_REGION` or `AWS_BEDROCK_REGION`
-- `AWS_ACCESS_KEY_ID` or `AWS_BEDROCK_ACCESS_KEY`
-- `AWS_SECRET_ACCESS_KEY` or `AWS_BEDROCK_SECRET_KEY`
-- `BEDROCK_MODEL_ID` (optional)
-- `AWS_BEDROCK_INFERENCE_PROFILE_ARN` (optional)
-- `FRONTEND_ORIGIN` (optional, default `http://localhost:3000`)
+- Buttons rendered, but clicks did nothing.
 
-### Frontend
+Fix intent:
 
-- `NEXT_PUBLIC_API_BASE_URL` (default `http://127.0.0.1:8009`)
-- `NEXT_PUBLIC_MODEL_NAME` (header badge text)
+- Wire action callback from UI renderer back to chat run handler.
+- Convert click payload into synthetic AG UI client event.
+- Route through normal backend run pipeline.
 
-## 9. Local Development
+Result:
 
-Install:
+- Actionable items are interactive and can generate new responses.
+
+## D. Recharts bars invisible/cut
+
+Problem:
+
+- Chart shell visible, bars invisible or clipped.
+
+Fix intent:
+
+- Enforce deterministic container dimensions.
+- Set explicit bar fill colors and stroke defaults.
+- Ensure axis/domain/dataKey mapping is correct.
+- Avoid overflow clipping in parent containers.
+
+Note:
+
+- HTML/CSS charts may render while Recharts fails if payload keys mismatch (`xKey`, `yKey`, `series`, or `dataKey`).
+
+## E. EventStream table empty in DevTools
+
+Problem:
+
+- Request payload visible but streamed event rows missing.
+
+Fix intent:
+
+- Emit complete AG UI lifecycle events in order.
+- Ensure `content-type` and stream framing are correct.
+- Flush events continuously during run.
+
+## 7. Content Formatting Standards
+
+To avoid plain-text quality issues:
+
+- Markdown tables must render as tables, not raw text.
+- Heading/list spacing must be normalized.
+- Avoid excessive emoji.
+- Prefer concise, structured language.
+- Use full available layout width for assistant content cards.
+
+## 8. Verification Checklist
+
+Use these prompts to validate component-first behavior:
+
+- "Show SAP modules as a bar chart with legend and filters."
+- "Create a migration readiness checklist with checkboxes and action buttons."
+- "Generate 5 SAP MCQs with selectable options and a submit action."
+- "Give a comparison table of ECC vs S/4HANA with recommendation cards."
+- "Create a dashboard for plant maintenance KPIs with trend chart + alerts."
+
+Expected outcomes:
+
+- At least one structured component in each response.
+- Charts visible and not clipped.
+- Actions trigger new responses.
+- Follow-up prompts use context without duplicating previous answer text.
+
+## 9. Local Run Commands
+
+Backend:
 
 ```bash
-npm install
-py -m pip install -r requirements.txt
+python -m backend.main
 ```
 
-Run backend:
-
-```bash
-py -m uvicorn backend.main:app --host 127.0.0.1 --port 8009
-```
-
-Run frontend:
+Frontend:
 
 ```bash
 npm run dev
 ```
 
-Open:
-- `http://localhost:3000/chat`
-
-## 10. Verification Commands
-
-Frontend type-check:
+Quick syntax check:
 
 ```bash
-npx tsc --noEmit
+python -m compileall backend
 ```
 
-Backend compile check:
+## 10. Troubleshooting
 
-```bash
-py -m compileall backend
-```
+## Built-in component not rendered
 
-Health check:
+- Validate payload matches expected A2UI schema.
+- Confirm component type is supported by resolver.
+- Check fallback registration in `registerCustomCatalog.tsx`.
 
-```http
-GET http://127.0.0.1:8009/health
-```
+## Button click has no effect
 
-## 11. Troubleshooting
+- Verify action handler wiring across resolver -> message list -> chat layout.
+- Confirm action payload includes required identifiers and parameters.
+- Check backend receives action event as a new run input.
 
-### 11.1 Empty assistant response on follow-up
+## Recharts still invisible
 
-- Current build emits fallback `ActionCard` when neither A2UI nor text is produced.
-- Verify backend path points to latest `backend/utils/streaming.py` process.
+- Confirm chart `data` is non-empty.
+- Confirm `xKey`/`yKey` map to actual data fields.
+- Ensure explicit bar `fill` is set.
+- Check parent container styles for clipping and zero-height issues.
 
-### 11.2 Chart labels visible but bars/lines not visible
+## EventStream empty
 
-- For bar charts, the component uses HTML/CSS bars.
-- If requesting line/pie and Recharts is still visually empty, verify payload numeric fields and fallback to bar for diagnosis.
-- Confirm payload reaches `RechartGraph` with resolved `data/xKey/yKey`.
+- Inspect response headers and stream framing.
+- Confirm backend emits incremental AG UI events, not only final payload.
 
-### 11.3 DevTools "EventStream" tab appears empty
+## 11. Design Principle (USP)
 
-This can happen even when streaming works, depending on browser handling of fetch-based SSE-like responses.
+The main USP is not plain conversational text. It is structured, interactive, visual AI responses powered by AG UI + A2UI.
 
-Use these checks instead:
-1. Confirm `/chat` response header `content-type: text/event-stream`.
-2. Check `Response` tab for streamed AG-UI frames.
-3. Confirm frontend receives `A2UI_MESSAGES` in `onCustomEvent`.
+Default response strategy should remain:
 
-### 11.4 Encoding/build errors (UTF-8)
+- UI components first
+- Actions second
+- Minimal text third
 
-- Source files must be valid UTF-8.
-- If Next.js reports invalid UTF-8, rewrite affected file as UTF-8 without corruption.
-
-## 12. Adding a New Custom A2UI Component
-
-1. Create UI component in `src/components/ui`.
-2. Register in `src/components/a2ui/registerCustomCatalog.tsx`.
-3. Add backend allowance/normalization in `backend/agents/agui_event_builder.py` and/or `backend/agents/a2ui_builder.py`.
-4. Update model prompt rules in `backend/agents/strands_agent.py` so it emits the component.
-5. Run:
-   - `npx tsc --noEmit`
-   - `py -m compileall backend`
-
-## 13. Legacy/Non-primary Paths
-
-These files exist but are not the primary runtime transport path:
-- `src/utils/sseClient.ts`
-- `src/utils/aguiDispatcher.ts`
-- `src/utils/historySerializer.ts`
-
-Primary transport path is AG-UI `HttpAgent` in `ChatLayout.tsx`.
+This ensures responses feel productized and task-oriented, not like a generic text bot.
